@@ -1,0 +1,12 @@
+# Local database -- your data lives in Supabase now; this is the old local copy
+tracker.db
+
+# Credentials -- never commit these
+.streamlit/secrets.toml
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
