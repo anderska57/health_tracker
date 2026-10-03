@@ -41,13 +41,32 @@ the home screen footer tells you which one is live.
 
 ## Get it on your phone
 
-Deploy to Streamlit Community Cloud (free): push this folder to a private
-GitHub repo, connect it at share.streamlit.io, and paste the same two secrets
-into the app's Secrets box. Then on your phone open the URL → Share → **Add to
-Home Screen**. It launches full-screen like an app.
+Deploy to Streamlit Community Cloud (free): connect the GitHub repo at
+share.streamlit.io and paste your secrets into the app's Secrets box. Then on
+your phone open the URL in Safari → Share → **Add to Home Screen**.
 
 > Don't skip the Supabase step before deploying. Community Cloud containers are
 > ephemeral — a SQLite file there is deleted on every restart.
+
+### Passcode (optional)
+
+Streamlit's own private-app sign-in goes through GitHub, which can be awkward on
+a phone (two-factor screens don't always appear inside its redirect). The app
+has its own gate instead. Add a third secret:
+
+```toml
+APP_PASSCODE = "four random words here"
+```
+
+With it set, the app shows only a passcode box until unlocked. The passcode can
+also ride in the URL — `https://<your-app>.streamlit.app/?k=<passcode>` — so a
+home-screen icon saved from that address opens straight in. With no
+`APP_PASSCODE` (e.g. running locally) there is no gate.
+
+The Supabase key never reaches the browser either way: Streamlit runs this
+Python on the server and sends only the rendered page. Anyone holding the
+passcode — or the home-screen URL that contains it — can read and write the
+log, so treat it like a password.
 
 ## Tests
 
@@ -84,23 +103,29 @@ reference text only — you convert a real pour into standard drinks yourself.
 
 **Supplements.** Two tables, carried over from `health.sqlite`: `supplements`
 is the catalog (one row per product) and `supplement_regimens` is a stretch of
-time you intended to take it a certain way. Stopping and restarting later makes
-a new regimen row, so separate trials stay separable — and the panel shows the
-regimen that was in force **on the date you are logging**, not today's. A
+time you intended to take it a certain way — your *usual intake*. Stopping and
+restarting later makes a new regimen row, so separate trials stay separable,
+and the panel shows the regimen in force **on the date you are logging**. A
 regimen belongs to a date by its span, not its current status; `paused` is the
 one status that removes a regimen from its own span.
 
-Daily regimens (`1/day`, `2/day`, `daily`) go in the one-tap "took my usual
-stack" confirmation, where you mark only what differed. This matters: if you
-logged *only* misses, a day with no rows would be ambiguous between "took
-everything" and "never opened the app," and adherence would drift upward over
-months. The confirmation row makes an unconfirmed day explicitly **unknown**,
-so it can be excluded from the denominator instead of counted as perfect. It
-also records which regimen ids were expected that day.
+Usual intake is **assumed taken** — the same logic as a food-frequency
+questionnaire's "usual intake". The panel lists that day's supplements already
+switched on; you only record what differed, and only differences are stored:
 
-Less-frequent regimens (`1/week`, `as needed`) are *not* part of that
-confirmation — "I didn't take my weekly suppository today" is not a miss. They
-get their own opt-in toggle and are recorded as positive events when taken.
+| `detail.kind` | meaning |
+|---|---|
+| `skipped` | a daily regimen not taken that day |
+| `dose_changed` | taken, at `quantity` instead of `detail.usual_dose` |
+| `taken` | a non-daily regimen (`1/week`, `as needed`) taken that day |
+| `extra` | a one-off, not part of any regimen |
+
+A day with no rows means "usual intake, as listed". Non-daily regimens start
+switched off, since there's no schedule to say which day they fall on. New
+supplements can be added from the panel itself — tick *Part of my usual
+intake* to start a regimen from that date, or leave it off for a one-off.
+(Older data may also contain `day_confirmed` and `exception` rows from an
+earlier version; the panel reads them and rewrites them on the next save.)
 
 To load a regimen list from an existing `health.sqlite`:
 
@@ -119,6 +144,11 @@ times, with snack always defaulting to now. `time_bucket` is then derived from
 the actual time, so food rows stay joinable with alcohol and symptom rows.
 Deliberately unstructured otherwise — the entries stay codable later against
 FNDDS/FDC when you decide how granular you want to be.
+
+**Symptoms.** Tap one from your list, or add a new one right on the panel.
+Pick severity and *every* time of day it applied. Each time of day is stored as
+its own row so `time_bucket` stays queryable next to alcohol and food; the rows
+share `detail.entry_id`, which ties them back into one entry.
 
 **Habits.** Binary (toggle) or count (stepper). Saving replaces the day rather
 than appending, so re-saving is safe.

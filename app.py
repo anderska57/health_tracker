@@ -9,6 +9,7 @@ Design rules this app is built around:
 
 from __future__ import annotations
 
+import hmac
 import uuid
 from datetime import date, datetime, time as dtime, timedelta
 
@@ -16,7 +17,7 @@ import pandas as pd
 import streamlit as st
 
 import config as C
-from db import get_db
+from db import _secret, get_db
 
 st.set_page_config(page_title=C.APP_TITLE, page_icon="✚",
                    layout="centered", initial_sidebar_state="collapsed")
@@ -32,6 +33,39 @@ st.markdown("""
   hr {margin: 0.6rem 0;}
 </style>
 """, unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Passcode gate
+# ---------------------------------------------------------------------------
+# Active only when APP_PASSCODE is set in secrets, so local runs stay open.
+# The passcode can come from the URL (?k=...), which is what lets a home-screen
+# icon open straight in, or be typed. Either way the Supabase key never leaves
+# the server: Streamlit runs this Python server-side and sends only rendered UI.
+
+def _passcode_ok(supplied: str | None, secret: str) -> bool:
+    return bool(supplied) and hmac.compare_digest(supplied.strip().encode(), secret.encode())
+
+
+def require_passcode():
+    secret = _secret("APP_PASSCODE")
+    if not secret or st.session_state.get("_authed"):
+        return
+    if _passcode_ok(st.query_params.get("k"), secret):
+        st.session_state._authed = True
+        return
+    st.markdown("## 🔒 Tracker")
+    with st.form("passcode"):
+        pw = st.text_input("Passcode", type="password")
+        if st.form_submit_button("Unlock", type="primary", width='stretch'):
+            if _passcode_ok(pw, secret):
+                st.session_state._authed = True
+                st.rerun()
+            st.error("That passcode didn't match.")
+    st.stop()
+
+
+require_passcode()
 
 
 # ---------------------------------------------------------------------------
@@ -333,20 +367,36 @@ def panel_food():
 def panel_symptoms():
     d = header("Symptoms")
     types = ref_rows("symptom_types")
-    if not types:
-        st.info("No symptoms defined yet. Add them in Settings.")
-        return
+    st.caption("Tap a symptom, set severity, and pick every time of day it applied.")
 
-    st.caption("Tap a symptom, set severity and when.")
-    cols = st.columns(3)
-    for i, t in enumerate(types):
-        with cols[i % 3]:
-            if st.button(t["name"], key=f"sym_{t['id']}", width='stretch'):
-                st.session_state.sym_lines.append(
-                    {"uid": str(uuid.uuid4())[:8], "name": t["name"],
-                     "severity": 3, "bucket": C.current_bucket(), "note": ""}
-                )
-                st.rerun()
+    def add_line(name: str):
+        st.session_state.sym_lines.append(
+            {"uid": str(uuid.uuid4())[:8], "name": name, "severity": 3,
+             "buckets": [C.current_bucket()], "note": ""})
+
+    if types:
+        cols = st.columns(3)
+        for i, t in enumerate(types):
+            with cols[i % 3]:
+                if st.button(t["name"], key=f"sym_{t['id']}", width='stretch'):
+                    add_line(t["name"])
+                    st.rerun()
+
+    with st.expander("➕ New symptom", expanded=not types):
+        rev = st.session_state.setdefault("sym_new_rev", 0)
+        new_name = st.text_input("Symptom name", key=f"sym_new_{rev}",
+                                 placeholder="e.g. brain fog")
+        if st.button("Add symptom", key="sym_new_add", width='stretch',
+                     disabled=not new_name.strip()):
+            name = new_name.strip()
+            known = {t["name"].lower(): t["name"] for t in types}
+            if name.lower() not in known:
+                db.ref_upsert("symptom_types", {"name": name, "active": True,
+                                                "sort_order": len(types)})
+                bust_refs()
+            add_line(known.get(name.lower(), name))
+            st.session_state.sym_new_rev = rev + 1   # clears the text box
+            st.rerun()
 
     lines = st.session_state.sym_lines
     if lines:
@@ -363,33 +413,54 @@ def panel_symptoms():
                     value=line["severity"], key=f"sv_{line['uid']}",
                     format_func=lambda v: C.SEVERITY_LABELS[v].split(" · ")[1],
                     label_visibility="collapsed")
-                line["bucket"] = bucket_picker(f"sb_{line['uid']}", line["bucket"])
+                picked = st.pills("time of day", C.TIME_BUCKETS, selection_mode="multi",
+                                  default=line["buckets"], key=f"sb_{line['uid']}",
+                                  label_visibility="collapsed")
+                line["buckets"] = [b for b in C.TIME_BUCKETS if b in (picked or [])]
                 line["note"] = st.text_input(
                     "note", value=line["note"], key=f"sn_{line['uid']}",
                     placeholder="note (optional)", label_visibility="collapsed")
 
+        missing = [l["name"] for l in lines if not l["buckets"]]
+        if missing:
+            st.warning("Pick at least one time of day for: " + ", ".join(missing))
         if st.button(f"Save {len(lines)} symptom{'s' if len(lines) != 1 else ''}",
-                     type="primary", width='stretch'):
-            db.events_insert([
-                {"event_date": d, "time_bucket": l["bucket"], "category": "symptom",
-                 "item": l["name"], "severity": int(l["severity"]),
-                 "note": l["note"].strip() or None}
-                for l in lines
-            ])
+                     type="primary", width='stretch', disabled=bool(missing)):
+            rows = []
+            for l in lines:
+                # One row per time of day keeps time_bucket queryable alongside
+                # alcohol and food; entry_id ties the rows back into one entry.
+                entry_id = str(uuid.uuid4())
+                for b in l["buckets"]:
+                    rows.append({
+                        "event_date": d, "time_bucket": b, "category": "symptom",
+                        "item": l["name"], "severity": int(l["severity"]),
+                        "note": l["note"].strip() or None,
+                        "detail": {"entry_id": entry_id, "buckets": l["buckets"]},
+                    })
+            db.events_insert(rows)
             st.session_state.sym_lines = []
             flash("Symptoms logged.")
             st.rerun()
 
     existing = day_events(d, "symptom")
     if existing:
+        groups: dict[str, list[dict]] = {}
+        for e in existing:
+            gid = (e.get("detail") or {}).get("entry_id") or e["id"]
+            groups.setdefault(gid, []).append(e)
         st.divider()
         st.markdown("**Already logged this day**")
-        for e in existing:
+        for gid, rows in groups.items():
+            first = rows[0]
+            seen = {r["time_bucket"] for r in rows}
+            when = ", ".join(b for b in C.TIME_BUCKETS if b in seen)
+            note = f" — {first['note']}" if first.get("note") else ""
             c1, c2 = st.columns([4, 0.8])
-            note = f" — {e['note']}" if e.get("note") else ""
-            c1.write(f"{e['item']} · severity {e['severity']} · {e['time_bucket']}{note}")
-            if c2.button("✕", key=f"del_{e['id']}", width='stretch'):
-                db.event_delete(e["id"])
+            c1.write(f"{first['item']} · severity {first['severity']} · {when}{note}")
+            if c2.button("✕", key=f"del_{gid}", width='stretch'):
+                for r in rows:
+                    db.event_delete(r["id"])
                 st.rerun()
 
 
@@ -397,95 +468,187 @@ def panel_symptoms():
 # Supplements
 # ---------------------------------------------------------------------------
 
+# Rows the Save button owns for a day. One-off "extra" rows are written and
+# removed individually, so a save never wipes them.
+_SUP_SAVE_KINDS = {"skipped", "dose_changed", "taken", "exception", "day_confirmed"}
+
+
+def _sup_meta(r: dict) -> str:
+    bits = [r.get("frequency"), r.get("brand")]
+    return " · ".join(b for b in bits if b)
+
+
+def _add_supplement(d: date, in_force: set, prefix: str):
+    """Submit callback: runs before the page re-renders, so the new item shows
+    up in the list immediately without an explicit rerun."""
+    ss = st.session_state
+    catalog = ref_rows("supplements")
+    pick, typed = ss[f"{prefix}_pick"], ss[f"{prefix}_name"].strip()
+    dose, unit = ss[f"{prefix}_dose"], ss[f"{prefix}_unit"].strip()
+    usual, freq, brand = ss[f"{prefix}_usual"], ss[f"{prefix}_freq"], ss[f"{prefix}_brand"].strip()
+
+    name = typed if pick == "— new supplement —" else pick
+    if not name:
+        ss["_sup_add_warning"] = "Give the supplement a name."
+        return
+    match = next((s for s in catalog if s["name"].lower() == name.lower()), None)
+    if usual and match and match["id"] in in_force:
+        ss["_sup_add_warning"] = f"{match['name']} is already in your usual list."
+        return
+    sid = match["id"] if match else db.ref_upsert("supplements", {
+        "name": name, "brand": brand or None, "sort_order": len(catalog)})
+    if usual:
+        db.ref_upsert("supplement_regimens", {
+            "supplement_id": sid, "dose": dose or None, "unit": unit or None,
+            "frequency": freq, "start_date": d.isoformat(), "end_date": None,
+            "status": "active", "reason": None, "notes": None})
+        flash(f"{name} added to your usual list from {d:%b} {d.day}.")
+    else:
+        db.events_insert([{
+            "event_date": d, "category": "supplement", "item": name,
+            "quantity": dose or None, "unit": unit or None,
+            "detail": {"kind": "extra", "supplement_id": sid}}])
+        flash(f"Logged {name} for this day.")
+    bust_refs()
+
+
+def supplement_add_form(d: date, regimens: list[dict], *, usual_default: bool, key: str):
+    catalog = ref_rows("supplements")
+    in_force = {r["supplement_id"] for r in regimens}
+    p = f"supadd_{key}"
+    warning = st.session_state.pop("_sup_add_warning", None)
+    if warning:
+        st.warning(warning)
+    with st.form(p, clear_on_submit=True):
+        st.selectbox("Supplement", ["— new supplement —"] + [s["name"] for s in catalog],
+                     key=f"{p}_pick")
+        st.text_input("Name (if new)", placeholder="Vitamin C", key=f"{p}_name")
+        c1, c2 = st.columns(2)
+        c1.number_input("Dose", min_value=0.0, step=0.5, value=1.0, key=f"{p}_dose")
+        c2.text_input("Unit", placeholder="capsule, mg, scoop", key=f"{p}_unit")
+        st.checkbox("Part of my usual intake", value=usual_default, key=f"{p}_usual",
+                    help="Usual supplements are assumed taken every day they're due.")
+        st.selectbox("How often (if usual)", C.SUPPLEMENT_FREQUENCIES, key=f"{p}_freq")
+        st.text_input("Brand (optional)", key=f"{p}_brand")
+        st.form_submit_button("Add", width='stretch', on_click=_add_supplement,
+                              args=(d, in_force, p))
+
+
 def panel_supplements():
     d = header("Supplements")
     regimens = db.regimens_on(d)
+
     if not regimens:
-        st.info("No active regimen for this date. Add your supplements in Settings.")
+        st.markdown("#### What do you usually take?")
+        st.caption("Add each supplement you take regularly and how often. From then "
+                   "on they're assumed taken unless you say otherwise.")
+        supplement_add_form(d, regimens, usual_default=True, key="setup")
         return
 
     daily = [r for r in regimens if C.is_daily(r.get("frequency"))]
     occasional = [r for r in regimens if not C.is_daily(r.get("frequency"))]
 
+    # What was already recorded for this day, keyed by regimen id (older rows by name).
     existing = day_events(d, "supplement")
-    confirmed = any((e.get("detail") or {}).get("kind") == "day_confirmed"
-                    for e in existing)
-    prior_exc = {e["item"]: (e.get("detail") or {}).get("exception")
-                 for e in existing if (e.get("detail") or {}).get("kind") == "exception"}
-    prior_taken = {e["item"] for e in existing
-                   if (e.get("detail") or {}).get("kind") == "taken"}
+    skipped, dose_seen, taken, extras, stored = set(), {}, set(), [], set()
+    for e in existing:
+        det = e.get("detail") or {}
+        kind, k = det.get("kind"), det.get("regimen_id") or e.get("item")
+        if kind == "skipped" or (kind == "exception" and det.get("exception") == "skipped"):
+            skipped.add(k)
+        elif kind == "dose_changed":
+            dose_seen[k] = e.get("quantity")
+        elif kind == "taken":
+            taken.add(k)
+            if e.get("quantity") is not None:
+                dose_seen[k] = e["quantity"]
+        elif kind == "extra" or (kind == "exception" and det.get("exception") == "extra"):
+            extras.append(e)
+        if kind in ("skipped", "dose_changed", "taken"):
+            stored.add((kind, k, e.get("quantity") if kind != "skipped" else None))
 
-    st.caption(
-        "One tap confirms you took your usual daily stack. Mark only what "
-        "differed — a day with no confirmation counts as *unknown*, not a miss."
-    )
+    def has(s, r):
+        return r["id"] in s or r["name"] in s
 
-    def caption_for(r):
-        bits = []
-        if r.get("dose"):
-            bits.append(f"{r['dose']:g} {r.get('unit') or ''}".strip())
-        if r.get("frequency"):
-            bits.append(r["frequency"])
-        if r.get("brand"):
-            bits.append(r["brand"])
-        return " · ".join(bits)
+    def recorded_dose(r):
+        return dose_seen.get(r["id"], dose_seen.get(r["name"]))
 
-    exceptions: dict[str, str] = {}
+    st.caption("Your usual supplements are assumed taken. Turn off anything you "
+               "skipped or change a dose, then save. If nothing changed, there's "
+               "nothing to do.")
+
+    rows, wanted = [], set()
+
+    def dose_row(r, k, enabled):
+        base = float(r["dose"]) if r.get("dose") is not None else 1.0
+        prior = recorded_dose(r)
+        return st.number_input(r.get("unit") or "dose", min_value=0.0, step=0.5,
+                               value=float(prior) if prior is not None else base,
+                               key=f"sd_{k}", disabled=not enabled), base
+
     if daily:
-        st.markdown("**Daily — anything different?**")
+        st.markdown("**Taken today**")
         for r in daily:
+            k = f"{d}_{r['id']}"
             with st.container(border=True):
-                c1, c2 = st.columns([2.2, 2.0])
-                c1.markdown(f"**{r['name']}**  \n<span class='ref'>{caption_for(r)}</span>",
-                            unsafe_allow_html=True)
-                opts = ["took it", "skipped", "extra"]
-                prior = prior_exc.get(r["name"])
-                choice = c2.radio("state", opts,
-                                  index=opts.index(prior) if prior in opts else 0,
-                                  key=f"sup_{r['id']}", horizontal=True,
-                                  label_visibility="collapsed")
-                if choice != "took it":
-                    exceptions[r["name"]] = choice
+                c1, c2 = st.columns([3, 1.6])
+                on = c1.toggle(r["name"], value=not has(skipped, r), key=f"st_{k}")
+                c1.caption(_sup_meta(r))
+                with c2:
+                    new_dose, base = dose_row(r, k, on)
+            if not on:
+                rows.append({"item": r["name"], "detail": {"kind": "skipped", "regimen_id": r["id"]}})
+                wanted.add(("skipped", r["id"], None))
+            elif abs(new_dose - base) > 1e-9:
+                rows.append({"item": r["name"], "quantity": new_dose, "unit": r.get("unit"),
+                             "detail": {"kind": "dose_changed", "regimen_id": r["id"],
+                                        "usual_dose": base}})
+                wanted.add(("dose_changed", r["id"], new_dose))
 
-    taken_occasional: list[dict] = []
     if occasional:
-        st.markdown("**Not daily — tap if you took it today**")
+        st.markdown("**Not daily — turn on if taken today**")
         for r in occasional:
+            k = f"{d}_{r['id']}"
             with st.container(border=True):
-                on = st.toggle(f"{r['name']} — {caption_for(r)}",
-                               value=r["name"] in prior_taken, key=f"occ_{r['id']}")
-                if on:
-                    taken_occasional.append(r)
+                c1, c2 = st.columns([3, 1.6])
+                on = c1.toggle(r["name"], value=has(taken, r), key=f"st_{k}")
+                c1.caption(_sup_meta(r))
+                with c2:
+                    new_dose, _ = dose_row(r, k, on)
+            if on:
+                rows.append({"item": r["name"], "quantity": new_dose, "unit": r.get("unit"),
+                             "detail": {"kind": "taken", "regimen_id": r["id"],
+                                        "frequency": r.get("frequency")}})
+                wanted.add(("taken", r["id"], new_dose))
 
-    label = "Update this day" if confirmed else "Took my usual stack"
-    if st.button(label, type="primary", width='stretch'):
-        rows = [{
-            "event_date": d, "category": "supplement", "item": None,
-            "detail": {"kind": "day_confirmed",
-                       "regimen_ids": [r["id"] for r in daily],
-                       "regimen_size": len(daily)},
-        }]
-        rows += [{
-            "event_date": d, "category": "supplement", "item": name,
-            "detail": {"kind": "exception", "exception": kind},
-        } for name, kind in exceptions.items()]
-        rows += [{
-            "event_date": d, "category": "supplement", "item": r["name"],
-            "quantity": r.get("dose"), "unit": r.get("unit"),
-            "detail": {"kind": "taken", "regimen_id": r["id"],
-                       "frequency": r.get("frequency")},
-        } for r in taken_occasional]
-        replace_day("supplement", d, rows)
-        n = len(daily) - sum(1 for k in exceptions.values() if k == "skipped")
-        flash(f"Confirmed — {n} of {len(daily)} daily taken.")
+    if extras:
+        st.markdown("**Also taken this day**")
+        for e in extras:
+            c1, c2 = st.columns([4, 0.8])
+            amt = f" · {e['quantity']:g} {e.get('unit') or ''}".rstrip() if e.get("quantity") else ""
+            c1.write(f"{e['item']}{amt}")
+            if c2.button("✕", key=f"del_{e['id']}", width='stretch'):
+                db.event_delete(e["id"])
+                st.rerun()
+
+    # Compare against what's stored by regimen id, so older name-keyed rows
+    # simply read as "changed" and get rewritten in the new shape on save.
+    changed = wanted != stored
+    if st.button("Save changes", type="primary", width='stretch', disabled=not changed):
+        for e in existing:
+            if (e.get("detail") or {}).get("kind") in _SUP_SAVE_KINDS:
+                db.event_delete(e["id"])
+        db.events_insert([{**row, "event_date": d, "category": "supplement"} for row in rows])
+        n_skip = sum(1 for r in rows if r["detail"]["kind"] == "skipped")
+        n_dose = sum(1 for r in rows if r["detail"]["kind"] == "dose_changed")
+        bits = [f"{n_skip} skipped" if n_skip else "", f"{n_dose} dose change{'s' if n_dose != 1 else ''}" if n_dose else ""]
+        flash("Saved — " + (", ".join(b for b in bits if b) or "your usual list stands for this day") + ".")
         st.rerun()
+    if not changed:
+        st.caption("No changes — your usual list counts for this day.")
 
-    if confirmed:
-        skipped = [k for k, v in prior_exc.items() if v == "skipped"]
-        st.success("Day confirmed." + (f" Skipped: {', '.join(skipped)}." if skipped else ""))
-    else:
-        st.warning("This day is unconfirmed — it will be excluded from adherence.")
-
+    with st.expander("➕ Add a supplement"):
+        supplement_add_form(d, regimens, usual_default=False, key="day")
 
 
 # ---------------------------------------------------------------------------

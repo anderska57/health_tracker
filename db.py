@@ -260,7 +260,7 @@ class SupabaseDB:
 
     def __init__(self, url: str, key: str):
         from supabase import create_client  # imported lazily
-        self.client = create_client(url, key)
+        self.client = create_client(normalize_supabase_url(url), key.strip())
 
     def setting_get(self, key: str, default=None):
         r = self.client.table("app_settings").select("value").eq("key", key).execute().data
@@ -354,6 +354,21 @@ def _prepare_event(row: dict, json_dumps: bool) -> dict:
     detail = out["detail"] or {}
     out["detail"] = json.dumps(detail) if json_dumps else detail
     return out
+
+
+def normalize_supabase_url(url: str) -> str:
+    """Accept any of the shapes the dashboard shows and return the base URL.
+
+    The client appends its own '/rest/v1', so a URL that already carries it
+    produces a doubled path and PostgREST answers PGRST125 ("Invalid path
+    specified in request URL"). Trailing slashes cause an empty segment with
+    the same result. Normalising here means it cannot matter what got pasted.
+    """
+    url = (url or "").strip().strip('"').strip("'").rstrip("/")
+    for suffix in ("/rest/v1", "/rest", "/graphql/v1", "/auth/v1"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+    return url.rstrip("/")
 
 
 def _secret(name: str) -> str | None:

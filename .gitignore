@@ -4,6 +4,12 @@ tracker.db
 # Credentials -- never commit these
 .streamlit/secrets.toml
 
+# Personal health data -- source file for import_supplements.py, kept local only
+supplements/*.sqlite
+
+# Personal notes kept in the project folder (e.g. the app URL)
+*.docx
+
 # Python bytecode
 __pycache__/
 *.pyc

@@ -120,34 +120,87 @@ open_panel(at, 2)
 check("symptoms renders", not at.exception, at)
 bloat = [b for b in at.button if str(b.label) == "bloating"]
 check("seeded symptoms are tappable", len(bloat) == 1)
-if bloat:
-    bloat[0].click().run()
-    check("tapping a symptom adds a line", not at.exception, at)
-    sv = [b for b in at.button if "Save" in str(b.label) and "symptom" in str(b.label)]
-    check("symptom save button present", len(sv) == 1)
-    if sv:
-        sv[0].click().run()
-        check("symptom save succeeds", not at.exception, at)
+bloat[0].click().run()
+check("tapping a symptom adds a line", not at.exception, at)
+check("time of day is a multi-select", len(at.pills) == 1)
+check("it starts on the current time of day",
+      list(at.pills[0].value) == [C.current_bucket()])
+at.pills[0].set_value(["morning", "evening"]).run()
+sv = [b for b in at.button if "Save" in str(b.label) and "symptom" in str(b.label)]
+sv[0].click().run()
+check("multi-time symptom saves", not at.exception, at)
+sym = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="symptom")
+check("one row per time of day", sorted(r["time_bucket"] for r in sym) == ["evening", "morning"])
+check("rows share one entry id",
+      len({r["detail"]["entry_id"] for r in sym}) == 1)
+check("recap shows it as one entry",
+      sum(1 for b in at.button if str(b.label) == "✕") == 1)
+
+new_box = [t for t in at.text_input if t.label == "Symptom name"]
+check("new-symptom box is on the page", len(new_box) == 1)
+new_box[0].set_value("brain fog").run()
+[b for b in at.button if str(b.label) == "Add symptom"][0].click().run()
+check("adding a new symptom works", not at.exception, at)
+check("it joins the symptom list",
+      "brain fog" in [t["name"] for t in SQLiteDB(os.environ["TRACKER_DB"]).ref_list("symptom_types")])
+check("and opens a line for it straight away",
+      any("brain fog" in str(m.value) for m in at.markdown))
 
 print("\nsupplements panel")
 at = fresh()
 open_panel(at, 3)
 check("supplements renders", not at.exception, at)
-conf = [b for b in at.button if "usual stack" in str(b.label) or "Update this day" in str(b.label)]
-check("confirm button present", len(conf) == 1)
-check("the daily regimen gets a took-it/skipped/extra choice", len(at.radio) == 1)
-check("the weekly regimen gets its own opt-in toggle", len(at.toggle) == 1)
-if conf:
-    conf[0].click().run()
-    check("confirming the day succeeds", not at.exception, at)
-    check("confirmed state is shown", len(at.success) >= 1, at)
-    sup = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")
-    conf_rows = [r for r in sup if r["detail"].get("kind") == "day_confirmed"]
-    check("exactly one confirmation row", len(conf_rows) == 1)
-    check("confirmation records which daily regimens were expected",
-          conf_rows and conf_rows[0]["detail"]["regimen_size"] == 1)
-    check("the untapped weekly regimen wrote no row",
-          not [r for r in sup if r["detail"].get("kind") == "taken"])
+check("daily supplement is shown as taken by default",
+      any(t.label == "Vitamin D3 + K2" and t.value for t in at.toggle))
+check("weekly supplement is shown as not taken by default",
+      any(t.label == "Probiotic (Vaginal)" and not t.value for t in at.toggle))
+save = [b for b in at.button if str(b.label) == "Save changes"]
+check("nothing to save when nothing changed", save and save[0].disabled)
+check("and no rows are written for an untouched day",
+      SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement") == [])
+
+[t for t in at.toggle if t.label == "Vitamin D3 + K2"][0].set_value(False).run()
+save = [b for b in at.button if str(b.label) == "Save changes"]
+check("turning one off enables save", save and not save[0].disabled)
+save[0].click().run()
+check("saving a skip works", not at.exception, at)
+sup = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")
+check("exactly one row: the skip",
+      [(r["item"], r["detail"]["kind"]) for r in sup] == [("Vitamin D3 + K2", "skipped")])
+
+at = fresh()
+open_panel(at, 3)
+check("the skip is remembered when reopening the day",
+      any(t.label == "Vitamin D3 + K2" and not t.value for t in at.toggle))
+[t for t in at.toggle if t.label == "Vitamin D3 + K2"][0].set_value(True).run()
+[n for n in at.number_input if n.label == "softgel"][0].set_value(2.0).run()
+[b for b in at.button if str(b.label) == "Save changes"][0].click().run()
+sup = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")
+check("re-saving replaces the skip with a dose change",
+      [(r["detail"]["kind"], r["quantity"]) for r in sup] == [("dose_changed", 2.0)])
+
+at = fresh()
+open_panel(at, 3)
+form_names = [t for t in at.text_input if t.label == "Name (if new)"]
+check("add-supplement form is on the page", len(form_names) == 1)
+form_names[0].set_value("Vitamin C")
+[n for n in at.number_input if n.label == "Dose"][0].set_value(500.0)
+[t for t in at.text_input if t.label == "Unit"][0].set_value("mg")
+[b for b in at.button if str(b.label) == "Add"][0].click().run()
+check("one-off add works", not at.exception, at)
+sup = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")
+check("one-off is logged as an extra for the day",
+      any(r["item"] == "Vitamin C" and r["detail"]["kind"] == "extra" for r in sup))
+check("extras survive alongside saved changes",
+      len(SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")) == 2)
+
+form_names = [t for t in at.text_input if t.label == "Name (if new)"]
+form_names[0].set_value("Iron")
+[c for c in at.checkbox if c.label == "Part of my usual intake"][0].check()
+[b for b in at.button if str(b.label) == "Add"][0].click().run()
+check("adding to the usual list works", not at.exception, at)
+check("new usual supplement appears in the taken-today list",
+      any(t.label == "Iron" and t.value for t in at.toggle))
 
 print("\nhabits panel")
 at = fresh()
@@ -175,6 +228,29 @@ if back:
 at = fresh()
 at.button[5].click().run()
 check("export tab lists events", any("events logged" in str(m.value) for m in at.markdown), at)
+
+print("\npasscode gate")
+os.environ["APP_PASSCODE"] = "correct horse battery"
+at = fresh()
+check("locked app shows only the passcode box",
+      not at.exception and len(at.text_input) == 1 and not any("Alcohol" in str(b.label) for b in at.button))
+at.text_input[0].set_value("wrong").run()
+at.button[0].click().run()
+check("a wrong passcode is rejected", len(at.error) == 1)
+at = fresh()
+at.text_input[0].set_value("correct horse battery").run()
+at.button[0].click().run()
+check("the right passcode unlocks it", any("Alcohol" in str(b.label) for b in at.button))
+at = AppTest.from_file("app.py", default_timeout=30)
+at.query_params["k"] = "correct horse battery"
+at.run()
+check("a passcode in the URL opens straight in",
+      not at.exception and any("Alcohol" in str(b.label) for b in at.button))
+at = AppTest.from_file("app.py", default_timeout=30)
+at.query_params["k"] = "nope"
+at.run()
+check("a wrong URL passcode stays locked", not any("Alcohol" in str(b.label) for b in at.button))
+del os.environ["APP_PASSCODE"]
 
 print()
 if fails:
