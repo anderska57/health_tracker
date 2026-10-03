@@ -58,10 +58,19 @@ has its own gate instead. Add a third secret:
 APP_PASSCODE = "four random words here"
 ```
 
-With it set, the app shows only a passcode box until unlocked. The passcode can
-also ride in the URL — `https://<your-app>.streamlit.app/?k=<passcode>` — so a
-home-screen icon saved from that address opens straight in. With no
+With it set, the app shows only a passcode box until unlocked. With no
 `APP_PASSCODE` (e.g. running locally) there is no gate.
+
+**Remember this device** (on by default) stores a cookie so the device opens
+straight in next time — including iPhone home-screen apps, which can't rely on
+the URL because web-app mode launches the site's start address. The cookie
+holds an HMAC of the passcode, not the passcode, so changing `APP_PASSCODE`
+locks out every remembered device at once. **Lock this device** on the home
+screen deletes the cookie. Browsers may still expire it on their own after a
+stretch without use.
+
+The passcode can also ride in the URL — `?k=<passcode>` — which works in a
+normal browser tab but puts the passcode in the address itself.
 
 The Supabase key never reaches the browser either way: Streamlit runs this
 Python on the server and sends only the rendered page. Anyone holding the

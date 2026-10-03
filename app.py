@@ -39,30 +39,81 @@ st.markdown("""
 # Passcode gate
 # ---------------------------------------------------------------------------
 # Active only when APP_PASSCODE is set in secrets, so local runs stay open.
-# The passcode can come from the URL (?k=...), which is what lets a home-screen
-# icon open straight in, or be typed. Either way the Supabase key never leaves
-# the server: Streamlit runs this Python server-side and sends only rendered UI.
+# Three ways in: a remembered device (cookie), the passcode in the URL (?k=...),
+# or typing it. The Supabase key never leaves the server either way: Streamlit
+# runs this Python server-side and sends only rendered UI to the browser.
+#
+# "Remember this device" stores a cookie rather than relying on the URL, because
+# iPhone home-screen web apps launch the site's start address and drop ?k=.
+# The cookie holds an HMAC of the passcode, never the passcode itself, so
+# changing APP_PASSCODE automatically locks out every remembered device.
+
+REMEMBER_COOKIE = "tracker_device"
+REMEMBER_DAYS = 400   # browsers cap cookie lifetimes around here anyway
+
 
 def _passcode_ok(supplied: str | None, secret: str) -> bool:
     return bool(supplied) and hmac.compare_digest(supplied.strip().encode(), secret.encode())
 
 
+def _device_token(secret: str) -> str:
+    return hmac.new(secret.encode(), b"tracker:remember-this-device", "sha256").hexdigest()
+
+
+def _write_cookie(value: str, max_age: int):
+    # Runs in the app's own page, so the cookie belongs to the app's origin.
+    st.html("<script>document.cookie = "
+            f"'{REMEMBER_COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax; Secure';"
+            "</script>", unsafe_allow_javascript=True)
+
+
 def require_passcode():
     secret = _secret("APP_PASSCODE")
-    if not secret or st.session_state.get("_authed"):
+    if not secret:
         return
+    ss = st.session_state
+
+    if ss.get("_authed"):
+        if ss.pop("_remember_pending", False):
+            _write_cookie(_device_token(secret), REMEMBER_DAYS * 86400)
+        return
+
+    if ss.pop("_forget_pending", False):
+        _write_cookie("", 0)
+    elif not ss.get("_ignore_cookie"):
+        try:
+            cookie = st.context.cookies.get(REMEMBER_COOKIE)
+        except Exception:          # no browser context (e.g. headless tests)
+            cookie = None
+        if isinstance(cookie, str) and cookie and \
+                hmac.compare_digest(cookie.encode(), _device_token(secret).encode()):
+            ss._authed = True
+            return
+
     if _passcode_ok(st.query_params.get("k"), secret):
-        st.session_state._authed = True
+        ss._authed = True
         return
+
     st.markdown("## 🔒 Tracker")
     with st.form("passcode"):
         pw = st.text_input("Passcode", type="password")
+        remember = st.checkbox("Remember this device", value=True)
         if st.form_submit_button("Unlock", type="primary", width='stretch'):
             if _passcode_ok(pw, secret):
-                st.session_state._authed = True
+                ss._authed = True
+                ss._remember_pending = remember
                 st.rerun()
             st.error("That passcode didn't match.")
     st.stop()
+
+
+def lock_device():
+    """Forget this device and return to the lock screen."""
+    ss = st.session_state
+    ss._authed = False
+    ss._forget_pending = True
+    ss._ignore_cookie = True      # this session's cookie snapshot is now stale
+    st.rerun()
 
 
 require_passcode()
@@ -237,6 +288,8 @@ def home():
     if st.button("⚙️  Settings & export", width='stretch'):
         go("settings")
     st.caption(f"storage: {db.kind}")
+    if _secret("APP_PASSCODE") and st.button("🔒 Lock this device", key="lock_device"):
+        lock_device()
 
 
 # ---------------------------------------------------------------------------

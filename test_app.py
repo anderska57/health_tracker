@@ -234,13 +234,22 @@ os.environ["APP_PASSCODE"] = "correct horse battery"
 at = fresh()
 check("locked app shows only the passcode box",
       not at.exception and len(at.text_input) == 1 and not any("Alcohol" in str(b.label) for b in at.button))
-at.text_input[0].set_value("wrong").run()
-at.button[0].click().run()
+at.text_input[0].set_value("wrong")          # typed and submitted together,
+at.button[0].click().run()                   # as a browser sends a form
 check("a wrong passcode is rejected", len(at.error) == 1)
 at = fresh()
-at.text_input[0].set_value("correct horse battery").run()
+at.text_input[0].set_value("correct horse battery")
 at.button[0].click().run()
 check("the right passcode unlocks it", any("Alcohol" in str(b.label) for b in at.button))
+check("remember-this-device is on by default",
+      any(c.label == "Remember this device" for c in AppTest.from_file("app.py").run().checkbox
+          if c.value))
+lock = [b for b in at.button if "Lock this device" in str(b.label)]
+check("a Lock this device button is offered once unlocked", len(lock) == 1)
+lock[0].click().run()
+at.run()   # let the screen settle (older AppTest keeps the pre-rerun tree)
+check("locking returns to the passcode screen",
+      not any("Alcohol" in str(b.label) for b in at.button) and len(at.text_input) == 1)
 at = AppTest.from_file("app.py", default_timeout=30)
 at.query_params["k"] = "correct horse battery"
 at.run()
