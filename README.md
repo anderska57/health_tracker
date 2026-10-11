@@ -106,14 +106,14 @@ function in `app.py`. No migration.
 ## Layout
 
 The home screen is a grid of tiles, three across, each showing a one-word
-status for today. Every panel opens with the same two lines: a small back arrow
-beside the title, then `◀  Today · Sat, Oct 10  ▶` (tap the date to jump to
-any day). Save buttons sit **above** their list, and lists are one row per
+status for today. Every category page opens with the same two lines: a boxed back
+button with the title centred, then `◀  Today · Sat, Oct 10  ▶` (tap the date
+to jump to any day). Save buttons sit **above** their list, and lists are one row per
 item, so most panels fit on a phone screen without scrolling. Adding a new
 item opens a pop-up rather than a form at the bottom of the page.
 
-Colours live in `.streamlit/config.toml` — change them there and push. That
-file also has a commented-out lighter palette to swap in.
+Colours live in `.streamlit/config.toml` (a soft teal palette) — change them
+there and push. That file also keeps the earlier dark palette, commented out.
 
 ### Per-category notes
 
@@ -160,7 +160,11 @@ running it twice changes nothing.
 **Medications.** Exactly the supplement model, on its own panel: the same two
 tables, with `supplements.kind = 'medication'`, and day-level rows logged with
 `category = 'medication'`. An *as needed* medication starts unchecked; check it
-on the days you take it. A database created before medications existed needs
+on the days you take it. Checking one (or adding a one-off) asks **why**:
+*preventive* or *for a symptom*, stored as `detail.purpose`. Choosing *for a
+symptom* opens a pop-up with the same questions as the Symptoms page; symptoms
+logged there carry `detail.treated_with` (the medication names), so the two can
+be joined by date. Daily medications aren't asked — they're routine. A database created before medications existed needs
 one line run in the Supabase SQL editor (the Medications panel shows it until
 then):
 
@@ -177,7 +181,11 @@ the actual time, so food rows stay joinable with alcohol and symptom rows.
 Deliberately unstructured otherwise — the entries stay codable later against
 FNDDS/FDC when you decide how granular you want to be.
 
-**Symptoms.** Tap one from your list, or add a new one right on the panel.
+**Symptoms.** Tap symptoms in an alphabetical picker (it scrolls once the list
+grows), or add a new one with **＋ New symptom** at the top. Tapped symptoms are
+highlighted and get their own line below. On "Logged this day", ✕ deletes that
+day's entry; the symptom stays in your list (remove it under Settings →
+Symptoms).
 Pick severity and *every* time of day it applied. Each time of day is stored as
 its own row so `time_bucket` stays queryable next to alcohol and food; the rows
 share `detail.entry_id`, which ties them back into one entry.

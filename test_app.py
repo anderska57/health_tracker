@@ -129,32 +129,42 @@ print("\nsymptoms panel")
 at = fresh()
 open_panel(at, "symptom")
 check("symptoms renders", not at.exception, at)
-check("seeded symptoms are tappable", len(btn(at, "bloating")) == 1)
-btn(at, "bloating")[0].click().run()
-check("tapping a symptom adds a line", not at.exception, at)
-check("time of day is a multi-select", len(at.pills) == 1)
-check("it starts on the current time of day", list(at.pills[0].value) == [C.current_bucket()])
+pick = at.pills[0]
+check("symptoms are an alphabetical picker",
+      list(pick.options) == sorted(C.DEFAULT_SYMPTOMS, key=str.lower))
+check("New symptom sits in the top bar, not among the symptoms",
+      at.button(key="add_btn") is not None and "New" in str(at.button(key="add_btn").label)
+      and not any("New" in o for o in pick.options))
+check("Save starts disabled", at.button(key="save_btn").disabled)
+pick.set_value(["bloating"]).run()
+check("picking a symptom adds a line", not at.exception and len(at.pills) == 2, at)
+check("time of day is a multi-select starting now", list(at.pills[1].value) == [C.current_bucket()])
 check("severity is a compact picker defaulting to 3", at.selectbox[0].value == 3)
-at.pills[0].set_value(["morning", "evening"]).run()
-sv = [b for b in at.button if "Save" in str(b.label) and "symptom" in str(b.label)]
-sv[0].click().run()
+at.pills[1].set_value(["morning", "evening"]).run()
+check("save button counts the symptoms", str(at.button(key="save_btn").label) == "Save 1 symptom")
+at.button(key="save_btn").click().run()
 check("multi-time symptom saves", not at.exception, at)
 sym = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="symptom")
 check("one row per time of day", sorted(r["time_bucket"] for r in sym) == ["evening", "morning"])
 check("rows share one entry id", len({r["detail"]["entry_id"] for r in sym}) == 1)
 check("recap shows it as one entry", sum(1 for b in at.button if str(b.label) == "✕") == 1)
+check("the picker is cleared after saving", not at.pills[0].value)
 
-btn(at, "＋ New")[0].click().run()
+at.button(key="add_btn").click().run()
 box = [t for t in at.text_input if t.label == "Symptom name"]
 check("new-symptom dialog opens", len(box) == 1)
-box[0].set_value("brain fog")
+box[0].set_value("Brain fog")
 btn(at, "Add symptom")[0].click().run()
 check("adding a new symptom works", not at.exception, at)
 check("it joins the symptom list",
-      "brain fog" in [t["name"] for t in SQLiteDB(os.environ["TRACKER_DB"]).ref_list("symptom_types")])
+      "Brain fog" in [t["name"] for t in SQLiteDB(os.environ["TRACKER_DB"]).ref_list("symptom_types")])
 check("the dialog closes and a line opens for it",
       not [t for t in at.text_input if t.label == "Symptom name"]
-      and any("brain fog" in str(m.value) for m in at.markdown))
+      and any("Brain fog" in str(m.value) for m in at.markdown))
+check("and it is selected, in alphabetical place, in the picker",
+      list(at.pills[0].value) == ["Brain fog"] and list(at.pills[0].options)[1] == "Brain fog")
+at.button(key="sym_sx_" + [k for k in [b.key for b in at.button] if k and k.startswith("sym_sx_")][0][7:]).click().run()
+check("✕ on a pending line drops it and unselects it", not at.pills[0].value and len(at.pills) == 1)
 
 
 def regimen_checks(kind, daily_name, daily_unit, occasional_name):
@@ -242,6 +252,61 @@ at.text_input(key="add_supplement_name").set_value("allergy TABLET")
 at.button(key="add_supplement_go").click().run()
 check("a medication name can't be re-added as a supplement",
       any("already on your list as a medication" in str(w.value) for w in at.warning))
+
+print("\nmedication taken for a symptom")
+at = fresh()
+open_panel(at, "medication")
+[c for c in at.checkbox if c.label == "Pain reliever"][0].uncheck().run()   # reset from earlier
+if not at.button(key="save_btn").disabled:
+    at.button(key="save_btn").click().run()
+check("as-needed medication has no 'why' until checked", len(at.pills) == 0)
+[c for c in at.checkbox if c.label == "Pain reliever"][0].check().run()
+check("checking it asks why", len(at.pills) == 1 and
+      list(at.pills[0].options) == ["preventive", "for a symptom"])
+at.pills[0].set_value("for a symptom").run()
+at.button(key="save_btn").click().run()
+check("saving opens the symptom follow-up", not at.exception and
+      any("for a symptom" in str(m.value) and "Pain reliever" in str(m.value) for m in at.markdown), at)
+ev = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="medication")
+check("the reason is stored with the medication",
+      any(r["item"] == "Pain reliever" and r["detail"].get("purpose") == "symptom" for r in ev))
+mp = [p for p in at.pills if p.key and p.key.startswith("medsym_pick_")][0]
+check("the follow-up uses the same alphabetical symptom list",
+      list(mp.options) == sorted(mp.options, key=str.lower) and "headache" in mp.options)
+mp.set_value(["headache"]).run()
+check("picking a symptom there opens the same questions",
+      any(s.key and s.key.startswith("medsym_sv_") for s in at.selectbox))
+at.button(key="medsym_save").click().run()
+check("saving the follow-up works", not at.exception, at)
+sym = [r for r in SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="symptom")
+       if r["item"] == "headache"]
+check("the symptom is logged, linked to the medication",
+      sym and sym[0]["detail"].get("treated_with") == ["Pain reliever"])
+check("the pop-up closes", not [b for b in at.button if b.key == "medsym_save"])
+at.run()
+check("re-saving without changes doesn't ask again",
+      at.button(key="save_btn").disabled and not [b for b in at.button if b.key == "medsym_save"])
+
+at.button(key="add_btn").click().run()
+at.text_input(key="add_medication_name").set_value("Antacid")
+check("a one-off medication asks why", at.pills(key="add_medication_purpose") is not None)
+at.pills(key="add_medication_purpose").set_value("for a symptom").run()
+at.button(key="add_medication_go").click().run()
+check("adding it for a symptom goes straight to the follow-up",
+      [b for b in at.button if b.key == "medsym_skip"] and not at.exception, at)
+at.button(key="medsym_skip").click().run()
+check("Skip closes it without logging a symptom",
+      not [b for b in at.button if b.key == "medsym_skip"]
+      and len([r for r in SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="symptom")
+               if r["detail"].get("treated_with") == ["Antacid"]]) == 0)
+ev = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="medication")
+check("the one-off keeps its reason",
+      any(r["item"] == "Antacid" and r["detail"].get("purpose") == "symptom" for r in ev))
+
+at = fresh()
+open_panel(at, "supplement")
+check("supplements never ask why", len(at.pills) == 0 or
+      not any("for a symptom" in (p.options or []) for p in at.pills))
 
 print("\nhome tiles reflect the day")
 at = fresh()

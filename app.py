@@ -38,21 +38,34 @@ st.markdown("""
 
   div[data-testid="stButton"] button {min-height: 2.5rem; padding: 0.25rem 0.6rem;}
   div[data-testid="stButton"] button p {font-size: 0.95rem; margin: 0;}
+  /* A tapped button kept a grey "focused" look on phones, which read as
+     selected. Selection is shown deliberately (filled teal) instead. */
+  div[data-testid="stButton"] button[kind="secondary"],
+  [data-testid="stPopover"] button {background-color: __BTN_BG__;}
+  @media (hover: none) {
+    div[data-testid="stButton"] button[kind="secondary"]:hover,
+    div[data-testid="stButton"] button[kind="secondary"]:focus {
+        background-color: __BTN_BG__; border-color: __BORDER__; color: inherit;}
+    [data-testid="stButtonGroup"] button[kind="pills"]:hover,
+    [data-testid="stButtonGroup"] button[kind="pills"]:focus {
+        background-color: __PAGE_BG__; border-color: __BORDER__; color: inherit;}
+  }
 
-  /* top line: small back arrow + page title */
-  .st-key-topbar button {min-height: 2rem !important; border: none;
-      background: transparent; padding: 0 0.5rem 0 0;}
-  .st-key-topbar button p {font-size: 1.45rem !important; line-height: 1;}
-  .ptitle {font-size: 1.3rem; font-weight: 600; margin: 0; line-height: 2rem;}
+  /* top line: boxed back button | centred title | spacer of the same width */
+  .st-key-topbar [data-testid="stHorizontalBlock"] {align-items: center;}
+  .st-key-back button {width: 3rem; height: 2.75rem; min-height: 2.75rem !important;
+      padding: 0 !important;}
+  .st-key-back button p {font-size: 1.35rem !important; line-height: 1;}
+  .ptitle {font-size: 1.3rem; font-weight: 650; margin: 0; line-height: 2.75rem;
+      text-align: center; white-space: nowrap;}
 
   /* date line: ◀  Sat, Oct 10  ▶ */
   .st-key-datebar button {min-height: 2.3rem;}
 
   /* home tiles */
   .st-key-tiles [data-testid="stHorizontalBlock"] {gap: 0.6rem;}
-  .st-key-tiles button {height: 6.4rem; flex-direction: column;
-      background: var(--tile-bg, rgba(255,255,255,0.04)); border-radius: 1rem;
-      border-top-width: 3px;}
+  .st-key-tiles button {height: 6.4rem; flex-direction: column; border-radius: 1rem;
+      border-top-width: 4px; box-shadow: 0 1px 2px rgba(29,59,56,0.08);}
   .st-key-tiles button p {white-space: normal !important; overflow: visible !important;
       text-overflow: clip !important; line-height: 1.3; font-size: 0.86rem !important;
       opacity: 0.8;}
@@ -74,6 +87,14 @@ st.markdown("""
   [class*="st-key-list"] [data-baseweb="input"], [class*="st-key-list"] [data-baseweb="select"] > div
       {min-height: 0 !important; height: 2.2rem;}
   [class*="st-key-list"] button {min-height: 2.1rem !important;}
+  /* a row with a second line (medication "why?") divides as one unit */
+  [class*="st-key-rowgroup_"] [data-testid="stHorizontalBlock"] {border-bottom: none;}
+  [class*="st-key-rowgroup_"] {border-bottom: 1px solid rgba(127,127,127,0.18);
+      padding-bottom: 0.3rem;}
+  [class*="st-key-rowgroup_"] [data-testid="stButtonGroup"] {padding-left: 2rem;}
+
+  /* symptom picker: scrolls once the list grows */
+  .st-key-sympick [data-testid="stButtonGroup"] {gap: 0.35rem;}
 
   .sect {font-size: 0.72rem; letter-spacing: 0.07em; text-transform: uppercase;
       opacity: 0.6; margin: 0.6rem 0 0.1rem;}
@@ -82,7 +103,10 @@ st.markdown("""
   .recap {opacity: 0.7; font-size: 0.85rem;}
   hr {margin: 0.4rem 0;}
 </style>
-""", unsafe_allow_html=True)
+""".replace("__BTN_BG__", st.get_option("theme.secondaryBackgroundColor") or "transparent")
+   .replace("__PAGE_BG__", st.get_option("theme.backgroundColor") or "transparent")
+   .replace("__BORDER__", st.get_option("theme.borderColor") or "rgba(127,127,127,0.3)"),
+   unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +149,10 @@ def require_passcode():
 
     if ss.get("_authed"):
         if ss.pop("_remember_pending", False):
-            _write_cookie(_device_token(secret), REMEMBER_DAYS * 86400)
+            # Written at the END of the page (see flush_cookie). Writing it here,
+            # above everything else, shifted the page and left ghost copies of
+            # home-screen buttons on later screens.
+            ss._cookie_out = (_device_token(secret), REMEMBER_DAYS * 86400)
         return
 
     if ss.pop("_forget_pending", False):
@@ -155,6 +182,13 @@ def require_passcode():
                 st.rerun()
             st.error("That passcode didn't match.")
     st.stop()
+
+
+def flush_cookie():
+    """Called once the page is drawn, so the cookie-writing snippet sits below it."""
+    out = st.session_state.pop("_cookie_out", None)
+    if out:
+        _write_cookie(*out)
 
 
 def lock_device():
@@ -201,6 +235,7 @@ st.session_state.setdefault("panel", None)
 st.session_state.setdefault("log_date", date.today())
 st.session_state.setdefault("alc_lines", [])
 st.session_state.setdefault("sym_lines", [])
+st.session_state.setdefault("medsym_lines", [])
 st.session_state.setdefault("flash", None)
 
 
@@ -209,6 +244,8 @@ def go(panel: str | None):
     st.session_state.pop("_dialog", None)
     st.session_state.alc_lines = []
     st.session_state.sym_lines = []
+    st.session_state.medsym_lines = []
+    st.session_state.sym_rev = st.session_state.get("sym_rev", 0) + 1
     st.rerun()
 
 
@@ -313,12 +350,13 @@ def day_label(d: date) -> str:
 
 
 def topbar(title: str):
-    """Line 1: a small back arrow at top left with the title beside it."""
-    with st.container(key="topbar", horizontal=True, vertical_alignment="center",
-                      gap="small"):
-        if st.button("←", key="back"):
+    """Line 1: a boxed back button, the title centred, and an empty column the
+    same width as the button on the right so the title is truly centred."""
+    with st.container(key="topbar"):
+        c1, c2, c3 = st.columns([1, 4.2, 1], vertical_alignment="center")
+        if c1.button("←", key="back"):
             go(None)
-        st.markdown(f"<div class='ptitle'>{title}</div>", unsafe_allow_html=True)
+        c2.markdown(f"<div class='ptitle'>{title}</div>", unsafe_allow_html=True)
 
 
 def header(title: str) -> date:
@@ -413,10 +451,12 @@ def home():
 def panel_alcohol():
     d = header("Alcohol")
 
+    chosen = {l["type"] for l in st.session_state.alc_lines}
     for i in range(0, len(C.DRINK_TYPES), 3):
         cols = st.columns(3)
         for col, t in zip(cols, C.DRINK_TYPES[i:i + 3]):
-            if col.button(t, key=f"drink_{t}", width='stretch'):
+            if col.button(t, key=f"drink_{t}", width='stretch',
+                          type="primary" if t in chosen else "secondary"):
                 st.session_state.alc_lines.append(
                     {"uid": str(uuid.uuid4())[:8], "type": t,
                      "qty": 1, "bucket": C.current_bucket()})
@@ -527,97 +567,145 @@ def panel_food():
 # ---------------------------------------------------------------------------
 # Symptoms
 # ---------------------------------------------------------------------------
+# The picker, the per-symptom editor and the save logic are shared by the
+# Symptoms page and the "log the symptom" pop-up that follows a medication
+# taken for a symptom, so both ask exactly the same questions.
 
-def _sym_add_line(name: str):
-    st.session_state.sym_lines.append(
-        {"uid": str(uuid.uuid4())[:8], "name": name, "severity": 3,
-         "buckets": [C.current_bucket()], "note": ""})
+SYM_PICK_SCROLL_AFTER = 12     # symptoms; beyond this the picker scrolls
+
+
+def _sym_new_line(name: str) -> dict:
+    return {"uid": str(uuid.uuid4())[:8], "name": name, "severity": 3,
+            "buckets": [C.current_bucket()], "note": ""}
+
+
+def symptom_names() -> list[str]:
+    return sorted((t["name"] for t in ref_rows("symptom_types")), key=str.lower)
+
+
+def ensure_symptom_type(name: str) -> str:
+    """Return the stored spelling of a symptom, creating it if it's new."""
+    types = ref_rows("symptom_types")
+    known = {t["name"].lower(): t["name"] for t in types}
+    if name.lower() in known:
+        return known[name.lower()]
+    db.ref_upsert("symptom_types", {"name": name, "active": True, "sort_order": len(types)})
+    bust_refs()
+    return name
+
+
+def _bump(rev_key: str):
+    st.session_state[rev_key] = st.session_state.get(rev_key, 0) + 1
+
+
+def symptom_picker(lines_key: str, scope: str):
+    """Alphabetical chips; tapping one adds it to the list below (highlighted),
+    tapping again removes it. Scrolls once the list grows."""
+    ss = st.session_state
+    lines = ss[lines_key]
+    names = symptom_names()
+    rev = ss.setdefault(f"{scope}_rev", 0)
+    chosen = [l["name"] for l in lines if l["name"] in names]
+    scrolls = len(names) > SYM_PICK_SCROLL_AFTER
+    with st.container(key=f"{scope}pick", height=168 if scrolls else "content",
+                      border=scrolls):
+        picked = st.pills("symptoms", names, selection_mode="multi", default=chosen,
+                          key=f"{scope}_pick_{rev}", label_visibility="collapsed") or []
+    have = {l["name"] for l in lines}
+    for n in picked:
+        if n not in have:
+            lines.append(_sym_new_line(n))
+    lines[:] = [l for l in lines if l["name"] in picked or l["name"] not in names]
+
+
+def symptom_editor(line: dict, lines_key: str, scope: str):
+    """One symptom: name · severity · ✕, then times of day, then a note."""
+    sev_opts = [1, 2, 3, 4, 5]
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([1.5, 2.3, 0.65], vertical_alignment="center")
+        c1.markdown(f"**{line['name']}**")
+        line["severity"] = c2.selectbox(
+            "severity", sev_opts, index=sev_opts.index(line["severity"]),
+            key=f"{scope}_sv_{line['uid']}", format_func=lambda v: C.SEVERITY_LABELS[v],
+            label_visibility="collapsed")
+        if c3.button("✕", key=f"{scope}_sx_{line['uid']}", width='stretch'):
+            st.session_state[lines_key].remove(line)
+            _bump(f"{scope}_rev")
+            st.rerun()
+        picked = st.pills("time of day", C.TIME_BUCKETS, selection_mode="multi",
+                          default=line["buckets"], key=f"{scope}_sb_{line['uid']}",
+                          label_visibility="collapsed")
+        line["buckets"] = [b for b in C.TIME_BUCKETS if b in (picked or [])]
+        line["note"] = st.text_input(
+            "note", value=line["note"], key=f"{scope}_sn_{line['uid']}",
+            placeholder="note (optional)", label_visibility="collapsed")
+
+
+def symptom_rows(lines: list[dict], d: date, extra: dict | None = None) -> list[dict]:
+    # One row per time of day keeps time_bucket queryable alongside alcohol
+    # and food; entry_id ties the rows back into one entry.
+    rows = []
+    for l in lines:
+        entry_id = str(uuid.uuid4())
+        for b in l["buckets"]:
+            rows.append({
+                "event_date": d, "time_bucket": b, "category": "symptom",
+                "item": l["name"], "severity": int(l["severity"]),
+                "note": l["note"].strip() or None,
+                "detail": {"entry_id": entry_id, "buckets": l["buckets"], **(extra or {})},
+            })
+    return rows
 
 
 @st.dialog("New symptom", on_dismiss=close_dialog)
 def new_symptom_dialog():
-    types = ref_rows("symptom_types")
     name = st.text_input("Symptom name", placeholder="e.g. brain fog")
     # Never disabled: on a phone the typed name only reaches the app when the box
     # loses focus, so a button that waits for it would swallow the first tap.
     if st.button("Add symptom", type="primary", width='stretch') and name.strip():
-        name = name.strip()
-        known = {t["name"].lower(): t["name"] for t in types}
-        if name.lower() not in known:
-            db.ref_upsert("symptom_types", {"name": name, "active": True,
-                                            "sort_order": len(types)})
-            bust_refs()
-        _sym_add_line(known.get(name.lower(), name))
+        name = ensure_symptom_type(name.strip())
+        if name not in {l["name"] for l in st.session_state.sym_lines}:
+            st.session_state.sym_lines.append(_sym_new_line(name))
+        _bump("sym_rev")
         close_dialog()
         st.rerun()
 
 
 def panel_symptoms():
     d = header("Symptoms")
-    types = ref_rows("symptom_types")
-
-    names = [t["name"] for t in types] + ["＋ New"]
-    for i in range(0, len(names), 3):
-        cols = st.columns(3)
-        for col, n in zip(cols, names[i:i + 3]):
-            if col.button(n, key=f"sym_{n}", width='stretch'):
-                if n == "＋ New":
-                    open_dialog("new_symptom")
-                else:
-                    _sym_add_line(n)
-                    st.rerun()
+    ss = st.session_state
+    lines = ss.sym_lines
+    bar = action_bar()
 
     if dialog_is("new_symptom"):
         new_symptom_dialog()
 
-    lines = st.session_state.sym_lines
-    bar = action_bar()
+    symptom_picker("sym_lines", "sym")
     if not lines:
-        st.caption("Tap a symptom, then set how bad and when.")
+        st.caption("Tap the symptoms you had, then set how bad and when.")
     else:
-        sev_opts = [1, 2, 3, 4, 5]
         with st.container(key="list"):
             for line in list(lines):
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([1.8, 1.9, 0.7], vertical_alignment="center")
-                    c1.markdown(f"**{line['name']}**")
-                    line["severity"] = c2.selectbox(
-                        "severity", sev_opts, index=sev_opts.index(line["severity"]),
-                        key=f"sv_{line['uid']}", format_func=lambda v: C.SEVERITY_LABELS[v],
-                        label_visibility="collapsed")
-                    if c3.button("✕", key=f"sx_{line['uid']}", width='stretch'):
-                        lines.remove(line)
-                        st.rerun()
-                    picked = st.pills("time of day", C.TIME_BUCKETS, selection_mode="multi",
-                                      default=line["buckets"], key=f"sb_{line['uid']}",
-                                      label_visibility="collapsed")
-                    line["buckets"] = [b for b in C.TIME_BUCKETS if b in (picked or [])]
-                    line["note"] = st.text_input(
-                        "note", value=line["note"], key=f"sn_{line['uid']}",
-                        placeholder="note (optional)", label_visibility="collapsed")
+                symptom_editor(line, "sym_lines", "sym")
 
-        missing = [l["name"] for l in lines if not l["buckets"]]
-        with bar:
-            if missing:
-                st.caption("Pick a time of day for: " + ", ".join(missing))
-            if st.button(f"Save {len(lines)} symptom{'s' if len(lines) != 1 else ''}",
-                         type="primary", width='stretch', disabled=bool(missing)):
-                rows = []
-                for l in lines:
-                    # One row per time of day keeps time_bucket queryable alongside
-                    # alcohol and food; entry_id ties the rows back into one entry.
-                    entry_id = str(uuid.uuid4())
-                    for b in l["buckets"]:
-                        rows.append({
-                            "event_date": d, "time_bucket": b, "category": "symptom",
-                            "item": l["name"], "severity": int(l["severity"]),
-                            "note": l["note"].strip() or None,
-                            "detail": {"entry_id": entry_id, "buckets": l["buckets"]},
-                        })
-                db.events_insert(rows)
-                st.session_state.sym_lines = []
-                flash("Symptoms logged.")
-                st.rerun()
+    missing = [l["name"] for l in lines if not l["buckets"]]
+    with bar:
+        c1, c2 = st.columns(2)
+        n = len(lines)
+        save = c1.button(f"Save {n} symptom{'s' if n != 1 else ''}" if n else "Save",
+                         type="primary", width='stretch', key="save_btn",
+                         disabled=not n or bool(missing))
+        if c2.button("＋ New symptom", width='stretch', key="add_btn"):
+            open_dialog("new_symptom")
+            st.rerun()
+        if missing:
+            st.caption("Pick a time of day for: " + ", ".join(missing))
+    if save:
+        db.events_insert(symptom_rows(lines, d))
+        ss.sym_lines = []
+        _bump("sym_rev")
+        flash("Symptoms logged.")
+        st.rerun()
 
     existing = day_events(d, "symptom")
     if existing:
@@ -625,15 +713,17 @@ def panel_symptoms():
         for e in existing:
             gid = (e.get("detail") or {}).get("entry_id") or e["id"]
             groups.setdefault(gid, []).append(e)
-        section("Logged this day")
+        section("Logged this day · ✕ deletes the entry")
         with st.container(key="list_logged"):
             for gid, rows in groups.items():
                 first = rows[0]
                 seen = {r["time_bucket"] for r in rows}
                 when = ", ".join(b for b in C.TIME_BUCKETS if b in seen)
                 note = f" — {first['note']}" if first.get("note") else ""
+                treated = (first.get("detail") or {}).get("treated_with")
+                took = f" · took {', '.join(treated)}" if treated else ""
                 c1, c2 = st.columns([5, 0.7], vertical_alignment="center")
-                c1.write(f"{first['item']} · {first['severity']}/5 · {when}{note}")
+                c1.write(f"{first['item']} · {first['severity']}/5 · {when}{took}{note}")
                 if c2.button("✕", key=f"del_{gid}", width='stretch'):
                     for r in rows:
                         db.event_delete(r["id"])
@@ -649,10 +739,70 @@ def panel_symptoms():
 _SUP_SAVE_KINDS = {"skipped", "dose_changed", "taken", "exception", "day_confirmed"}
 _NEW = "— new —"
 
+# Why a medication was taken. Asked for as-needed and one-off medications;
+# a daily medication is routine, so it isn't asked every day.
+PURPOSE_LABELS = {"preventive": "preventive", "symptom": "for a symptom"}
+_PURPOSE_BY_LABEL = {v: k for k, v in PURPOSE_LABELS.items()}
+
+
+def purpose_picker(key: str, current: str | None) -> str | None:
+    label = st.pills("why", list(PURPOSE_LABELS.values()), selection_mode="single",
+                     default=PURPOSE_LABELS.get(current), key=key,
+                     label_visibility="collapsed")
+    return _PURPOSE_BY_LABEL.get(label)
+
+
+def start_symptom_followup(d: date, meds: list[str]):
+    """After a medication taken for a symptom: offer to log that symptom."""
+    st.session_state._medsym = {"date": d.isoformat(), "meds": meds}
+    st.session_state.medsym_lines = []
+    _bump("medsym_rev")
+    open_dialog("medsym")
+
+
+def _medsym_dismiss():
+    close_dialog()
+    st.session_state.pop("_medsym", None)
+    st.session_state.medsym_lines = []
+
+
+@st.dialog("Log the symptom too?", on_dismiss=_medsym_dismiss)
+def medsym_dialog():
+    ss = st.session_state
+    ctx = ss.get("_medsym") or {}
+    meds = ctx.get("meds") or []
+    d = date.fromisoformat(ctx.get("date", date.today().isoformat()))
+    st.markdown(f"You took **{', '.join(meds)}** for a symptom. Which one?")
+    symptom_picker("medsym_lines", "medsym")
+    c1, c2 = st.columns([3, 1.3], vertical_alignment="bottom")
+    new = c1.text_input("Or a new symptom", key=f"medsym_new_{ss.get('medsym_rev', 0)}",
+                        placeholder="e.g. brain fog")
+    if c2.button("Add", key="medsym_new_add", width='stretch') and new.strip():
+        name = ensure_symptom_type(new.strip())
+        if name not in {l["name"] for l in ss.medsym_lines}:
+            ss.medsym_lines.append(_sym_new_line(name))
+        _bump("medsym_rev")
+        st.rerun(scope="fragment")
+    for line in list(ss.medsym_lines):
+        symptom_editor(line, "medsym_lines", "medsym")
+    missing = [l["name"] for l in ss.medsym_lines if not l["buckets"]]
+    if missing:
+        st.caption("Pick a time of day for: " + ", ".join(missing))
+    c1, c2 = st.columns(2)
+    if c1.button("Save symptom", type="primary", width='stretch', key="medsym_save",
+                 disabled=not ss.medsym_lines or bool(missing)):
+        db.events_insert(symptom_rows(ss.medsym_lines, d, {"treated_with": meds}))
+        flash("Medication and symptom logged.")
+        _medsym_dismiss()
+        st.rerun()
+    if c2.button("Skip", width='stretch', key="medsym_skip"):
+        _medsym_dismiss()
+        st.rerun()
+
 
 def _add_item(kind: str, d: date, regimens: list[dict], *, pick: str, typed: str,
               dose: float, unit: str, usual: bool, freq: str, brand: str,
-              reason: str) -> str | None:
+              reason: str, purpose: str | None = None) -> str | None:
     """Add a one-off for the day, or start a usual regimen. Returns an error
     message, or None on success."""
     noun = REGIMEN_KINDS[kind]["noun"]
@@ -678,7 +828,8 @@ def _add_item(kind: str, d: date, regimens: list[dict], *, pick: str, typed: str
         db.events_insert([{
             "event_date": d, "category": kind, "item": name,
             "quantity": dose or None, "unit": unit or None, "note": reason or None,
-            "detail": {"kind": "extra", "supplement_id": sid}}])
+            "detail": {"kind": "extra", "supplement_id": sid,
+                       **({"purpose": purpose} if purpose else {})}}])
         flash(f"Logged {name} for this day.")
     bust_refs()
     return None
@@ -701,14 +852,23 @@ def _add_dialog_body(kind: str, d: date, regimens: list[dict], usual_default: bo
     c1, c2 = st.columns(2)
     brand = c1.text_input("Brand (optional)", key=f"{p}_brand") if pick == _NEW else ""
     reason = c2.text_input("What for (optional)", key=f"{p}_reason")
+    purpose = None
+    if kind == "medication" and not usual:
+        st.caption("Taken why?")
+        purpose = purpose_picker(f"{p}_purpose", None)
     if st.button("Add", type="primary", width='stretch', key=f"{p}_go"):
         err = _add_item(kind, d, regimens, pick=pick, typed=typed or "", dose=dose,
                         unit=(unit or "").strip(), usual=usual, freq=freq,
-                        brand=(brand or "").strip(), reason=(reason or "").strip())
+                        brand=(brand or "").strip(), reason=(reason or "").strip(),
+                        purpose=purpose)
         if err:
             st.warning(err)
         else:
             close_dialog()
+            if purpose == "symptom":
+                st.session_state.flash = None
+                name = (typed if pick == _NEW else pick).strip()
+                start_symptom_followup(d, [name])
             st.rerun()
 
 
@@ -737,6 +897,8 @@ def panel_regimen(kind: str):
                 open_dialog(f"add_{kind}")
         if dialog_is(f"add_{kind}"):
             _ADD_DIALOGS[kind](kind, d, regimens, True)
+        elif dialog_is("medsym"):
+            medsym_dialog()
         st.markdown(f"**What do you usually take?**  \nAdd each {noun} you take regularly "
                     "and how often. From then on they're assumed taken unless you say "
                     "otherwise.")
@@ -748,6 +910,7 @@ def panel_regimen(kind: str):
     # What was already recorded for this day, keyed by regimen id (older rows by name).
     existing = day_events(d, kind)
     skipped, dose_seen, taken, extras, stored = set(), {}, set(), [], set()
+    purpose_seen: dict[str, str] = {}
     for e in existing:
         det = e.get("detail") or {}
         k, key = det.get("kind"), det.get("regimen_id") or e.get("item")
@@ -759,10 +922,13 @@ def panel_regimen(kind: str):
             taken.add(key)
             if e.get("quantity") is not None:
                 dose_seen[key] = e["quantity"]
+            if det.get("purpose"):
+                purpose_seen[key] = det["purpose"]
         elif k == "extra" or (k == "exception" and det.get("exception") == "extra"):
             extras.append(e)
         if k in ("skipped", "dose_changed", "taken"):
-            stored.add((k, key, e.get("quantity") if k != "skipped" else None))
+            stored.add((k, key, e.get("quantity") if k != "skipped" else None,
+                        det.get("purpose") if k == "taken" else None))
 
     def has(s, r):
         return r["id"] in s or r["name"] in s
@@ -792,22 +958,29 @@ def panel_regimen(kind: str):
                 if not on:
                     rows.append({"item": r["name"],
                                  "detail": {"kind": "skipped", "regimen_id": r["id"]}})
-                    wanted.add(("skipped", r["id"], None))
+                    wanted.add(("skipped", r["id"], None, None))
                 elif abs(dose - base) > 1e-9:
                     rows.append({"item": r["name"], "quantity": dose, "unit": r.get("unit"),
                                  "detail": {"kind": "dose_changed", "regimen_id": r["id"],
                                             "usual_dose": base}})
-                    wanted.add(("dose_changed", r["id"], dose))
+                    wanted.add(("dose_changed", r["id"], dose, None))
 
         if occasional:
             section("Weekly & as needed — check if taken")
             for r in occasional:
-                on, dose, _ = item_row(r, has(taken, r))
+                with st.container(key=f"rowgroup_{r['id']}"):
+                    on, dose, _ = item_row(r, has(taken, r))
+                    purpose = None
+                    if on and kind == "medication":
+                        purpose = purpose_picker(
+                            f"pp_{kind}_{d}_{r['id']}",
+                            purpose_seen.get(r["id"], purpose_seen.get(r["name"])))
                 if on:
                     rows.append({"item": r["name"], "quantity": dose, "unit": r.get("unit"),
                                  "detail": {"kind": "taken", "regimen_id": r["id"],
-                                            "frequency": r.get("frequency")}})
-                    wanted.add(("taken", r["id"], dose))
+                                            "frequency": r.get("frequency"),
+                                            **({"purpose": purpose} if purpose else {})}})
+                    wanted.add(("taken", r["id"], dose, purpose))
 
         if extras:
             section("Also taken this day")
@@ -815,7 +988,8 @@ def panel_regimen(kind: str):
                 c1, c2 = st.columns([5, 0.7], vertical_alignment="center")
                 amt = f" · {fmt_qty(e['quantity'])} {e.get('unit') or ''}".rstrip() \
                     if e.get("quantity") else ""
-                c1.write(f"{e['item']}{amt}")
+                why = PURPOSE_LABELS.get((e.get("detail") or {}).get("purpose"), "")
+                c1.write(f"{e['item']}{amt}" + (f" · {why}" if why else ""))
                 if c2.button("✕", key=f"del_{e['id']}", width='stretch'):
                     db.event_delete(e["id"])
                     st.rerun()
@@ -837,13 +1011,23 @@ def panel_regimen(kind: str):
         n_dose = sum(1 for r in rows if r["detail"]["kind"] == "dose_changed")
         bits = [f"{n_skip} skipped" if n_skip else "",
                 f"{n_dose} dose change{'s' if n_dose != 1 else ''}" if n_dose else ""]
-        flash("Saved — " + (", ".join(b for b in bits if b)
-                            or "your usual list stands for this day") + ".")
+        # Newly marked "for a symptom": offer to log the symptom straight away
+        # (the pop-up is the confirmation then, so no toast on top of it).
+        before = {t[1] for t in stored if t[0] == "taken" and t[3] == "symptom"}
+        newly = [r["item"] for r in rows if r["detail"].get("purpose") == "symptom"
+                 and r["detail"]["regimen_id"] not in before]
+        if newly:
+            start_symptom_followup(d, newly)
+        else:
+            flash("Saved — " + (", ".join(b for b in bits if b)
+                                or "your usual list stands for this day") + ".")
         st.rerun()
     if add:
         open_dialog(f"add_{kind}")
     if dialog_is(f"add_{kind}"):
         _ADD_DIALOGS[kind](kind, d, regimens, False)
+    elif dialog_is("medsym"):
+        medsym_dialog()
 
 
 def panel_supplements():
@@ -1110,3 +1294,4 @@ ROUTES = {
 }
 
 ROUTES.get(st.session_state.panel, home)()
+flush_cookie()
