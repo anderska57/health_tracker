@@ -1,7 +1,7 @@
 # Health tracker — beta
 
-Five logging panels (food, alcohol, symptoms, supplements, habits) over one
-event table. Python + Streamlit, SQLite locally, Supabase in production.
+Six logging panels (food, alcohol, symptoms, supplements, medications, habits)
+over one event table. Python + Streamlit, SQLite locally, Supabase in production.
 
 ## Run it locally right now
 
@@ -81,7 +81,7 @@ log, so treat it like a password.
 
 ```bash
 python3 test_smoke.py   # storage layer + every category's data shape
-python3 test_app.py     # renders and clicks through all five panels headlessly
+python3 test_app.py     # renders and clicks through every panel headlessly
 ```
 
 ## Data model
@@ -94,14 +94,26 @@ Everything lands in one `events` table:
 | `event_time` | real clock time where one is meaningful (food); null elsewhere |
 | `time_bucket` | morning / afternoon / evening / night (null where not meaningful) |
 | `logged_at` | when the row was written — lets you tell live from retrospective logging |
-| `category` | food / alcohol / symptom / supplement / habit |
-| `item` | drink type, food text, symptom name, supplement name, habit name |
+| `category` | food / alcohol / symptom / supplement / medication / habit |
+| `item` | drink type, food text, symptom name, supplement or medication name, habit name |
 | `quantity`, `unit` | drinks, habit counts |
 | `severity` | symptoms, 1–5 |
 | `detail` | jsonb — category-specific extras (meal slot, habit kind, supplement exception) |
 
-Adding a sixth panel is a new `category` value plus a function in `app.py`. No
-migration.
+Adding another panel is a new `category` value, a tile in `PANELS`, and a
+function in `app.py`. No migration.
+
+## Layout
+
+The home screen is a grid of tiles, three across, each showing a one-word
+status for today. Every panel opens with the same two lines: a small back arrow
+beside the title, then `◀  Today · Sat, Oct 10  ▶` (tap the date to jump to
+any day). Save buttons sit **above** their list, and lists are one row per
+item, so most panels fit on a phone screen without scrolling. Adding a new
+item opens a pop-up rather than a form at the bottom of the page.
+
+Colours live in `.streamlit/config.toml` — change them there and push. That
+file also has a commented-out lighter palette to swap in.
 
 ### Per-category notes
 
@@ -145,6 +157,17 @@ python3 import_supplements.py supplements/health.sqlite
 Idempotent — matches on name and on (supplement, start date, frequency), so
 running it twice changes nothing.
 
+**Medications.** Exactly the supplement model, on its own panel: the same two
+tables, with `supplements.kind = 'medication'`, and day-level rows logged with
+`category = 'medication'`. An *as needed* medication starts unchecked; check it
+on the days you take it. A database created before medications existed needs
+one line run in the Supabase SQL editor (the Medications panel shows it until
+then):
+
+```sql
+alter table supplements add column if not exists kind text not null default 'supplement';
+```
+
 **Food.** Free text per eating occasion. Four occasions — breakfast, lunch,
 dinner, snack — each carrying a real clock time, because the occasion alone was
 ambiguous (dinner eaten at 10pm is still dinner). Picking an occasion prefills
@@ -159,7 +182,7 @@ Pick severity and *every* time of day it applied. Each time of day is stored as
 its own row so `time_bucket` stays queryable next to alcohol and food; the rows
 share `detail.entry_id`, which ties them back into one entry.
 
-**Habits.** Binary (toggle) or count (stepper). Saving replaces the day rather
+**Habits.** Binary (checkbox) or count (number box). Saving replaces the day rather
 than appending, so re-saving is safe.
 
 ## Known beta limitations

@@ -27,19 +27,25 @@ def fresh():
     return at
 
 
-def open_panel(at, idx):
-    at.button[idx].click().run()
+def open_panel(at, cat):
+    at.button(key=f"panel_{cat}").click().run()
     return at
+
+
+def btn(at, label):
+    return [b for b in at.button if str(b.label) == label]
 
 
 print("home screen")
 at = fresh()
 check("home renders without exception", not at.exception, at)
-check("five panel buttons + settings", len(at.button) >= 6)
+check("six category tiles", all(at.button(key=f"panel_{c}") for c in
+                                ("food", "alcohol", "symptom", "supplement", "medication", "habit")))
+check("settings gear present", at.button(key="settings") is not None)
 
-print("\nsettings: seed lists, add a supplement regimen")
+print("\nsettings: seed lists, add regimens")
 at = fresh()
-at.button[5].click().run()                      # settings
+at.button(key="settings").click().run()
 check("settings renders", not at.exception, at)
 seed = [b for b in at.button if "Seed" in str(b.label)]
 check("seed button present", len(seed) == 1)
@@ -53,60 +59,65 @@ sid = sdb.ref_upsert("supplements", {"name": "Vitamin D3 + K2", "form": "softgel
 sdb.ref_upsert("supplement_regimens", {
     "supplement_id": sid, "dose": 1.0, "unit": "softgel", "frequency": "1/day",
     "start_date": "2026-01-01", "status": "active"})
-wid = sdb.ref_upsert("supplements", {"name": "Probiotic (Vaginal)", "form": "suppository"})
+wid = sdb.ref_upsert("supplements", {"name": "Iron", "form": "tablet"})
 sdb.ref_upsert("supplement_regimens", {
-    "supplement_id": wid, "dose": 1.0, "unit": "suppository", "frequency": "1/week",
+    "supplement_id": wid, "dose": 1.0, "unit": "tablet", "frequency": "1/week",
     "start_date": "2026-02-01", "status": "active"})
+mid = sdb.ref_upsert("supplements", {"name": "Allergy tablet", "kind": "medication"})
+sdb.ref_upsert("supplement_regimens", {
+    "supplement_id": mid, "dose": 10.0, "unit": "mg", "frequency": "1/day",
+    "start_date": "2026-01-01", "status": "active"})
+pid = sdb.ref_upsert("supplements", {"name": "Pain reliever", "kind": "medication"})
+sdb.ref_upsert("supplement_regimens", {
+    "supplement_id": pid, "dose": 200.0, "unit": "mg", "frequency": "as needed",
+    "start_date": "2026-01-01", "status": "active"})
 
 at = fresh()
-at.button[5].click().run()
-check("settings renders the regimen list", not at.exception, at)
+at.button(key="settings").click().run()
+check("settings renders the regimen lists", not at.exception, at)
 check("meal-times tab exposes three editable times", len(at.time_input) == 3)
+check("settings has a Medications tab", any(t.label == "Medications" for t in at.tabs))
 
 print("\nalcohol panel")
 at = fresh()
-open_panel(at, 1)
+open_panel(at, "alcohol")
 check("alcohol renders", not at.exception, at)
-wine = [b for b in at.button if str(b.label) == "wine"]
-check("six drink buttons", len([b for b in at.button if str(b.label) in
-                                ("wine", "seltzer", "whiskey", "gin", "beer", "other liquor")]) == 6)
-wine[0].click().run()
+check("six drink buttons", len([b for b in at.button if str(b.label) in C.DRINK_TYPES]) == 6)
+btn(at, "wine")[0].click().run()
 check("tapping wine adds a line", not at.exception, at)
 check("qty defaults to 1", at.number_input[0].value == 1)
-check("time-of-day shows all four options",
-      list(at.radio[0].options) == ["morning", "afternoon", "evening", "night"])
-wine[0].click().run()                            # second wine line
+check("time of day is a compact picker with all four options",
+      list(at.selectbox[0].options) == C.TIME_BUCKETS)
+check("it starts on the current time of day", at.selectbox[0].value == C.current_bucket())
+btn(at, "wine")[0].click().run()                 # second wine line
 at.number_input[0].set_value(2).run()
-at.radio[1].set_value("night").run()
+at.selectbox[1].set_value("night").run()
 save = [b for b in at.button if "Save" in str(b.label) and "drink" in str(b.label)]
 check("save button reflects the running total", len(save) == 1 and "3 drinks" in str(save[0].label))
 save[0].click().run()
 check("alcohol save succeeds", not at.exception, at)
-check("saved rows appear in the day recap",
-      any("wine" in str(m.value) for m in at.markdown) or
-      any("wine" in str(t.value) for t in at.get("text")), at)
+alc = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="alcohol")
+check("two alcohol rows saved", sorted(int(r["quantity"]) for r in alc) == [1, 2])
+check("saved rows appear in the day recap", any("wine" in str(m.value) for m in at.markdown))
 
 print("\nfood panel")
 at = fresh()
-open_panel(at, 0)
+open_panel(at, "food")
 check("food renders", not at.exception, at)
-slots = {str(b.label): b for b in at.button if str(b.label) in C.MEAL_SLOTS}
-check("four occasions on screen", len(slots) == 4)
+check("four occasions on screen", len([b for b in at.button if str(b.label) in C.MEAL_SLOTS]) == 4)
 check("exactly one is selected",
       sum(1 for b in at.button if b.proto.type == "primary"
           and str(b.label) in C.MEAL_SLOTS) == 1)
 check("a time input is present", len(at.time_input) == 1)
-
-slots["dinner"].click().run()
+btn(at, "dinner")[0].click().run()
 check("picking dinner prefills its default time",
       at.time_input[0].value.strftime("%H:%M") == C.DEFAULT_MEAL_TIMES["dinner"])
 at.time_input[0].set_value(dt_time(22, 15)).run()   # a late dinner
 at.text_area[0].set_value("leftover pasta").run()
-save = [b for b in at.button if str(b.label) == "Save"]
+save = btn(at, "Save")
 check("save button present", len(save) == 1)
 save[0].click().run()
 check("food save succeeds", not at.exception, at)
-
 rows = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="food")
 check("one food row saved", len(rows) == 1)
 if rows:
@@ -116,117 +127,155 @@ if rows:
 
 print("\nsymptoms panel")
 at = fresh()
-open_panel(at, 2)
+open_panel(at, "symptom")
 check("symptoms renders", not at.exception, at)
-bloat = [b for b in at.button if str(b.label) == "bloating"]
-check("seeded symptoms are tappable", len(bloat) == 1)
-bloat[0].click().run()
+check("seeded symptoms are tappable", len(btn(at, "bloating")) == 1)
+btn(at, "bloating")[0].click().run()
 check("tapping a symptom adds a line", not at.exception, at)
 check("time of day is a multi-select", len(at.pills) == 1)
-check("it starts on the current time of day",
-      list(at.pills[0].value) == [C.current_bucket()])
+check("it starts on the current time of day", list(at.pills[0].value) == [C.current_bucket()])
+check("severity is a compact picker defaulting to 3", at.selectbox[0].value == 3)
 at.pills[0].set_value(["morning", "evening"]).run()
 sv = [b for b in at.button if "Save" in str(b.label) and "symptom" in str(b.label)]
 sv[0].click().run()
 check("multi-time symptom saves", not at.exception, at)
 sym = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="symptom")
 check("one row per time of day", sorted(r["time_bucket"] for r in sym) == ["evening", "morning"])
-check("rows share one entry id",
-      len({r["detail"]["entry_id"] for r in sym}) == 1)
-check("recap shows it as one entry",
-      sum(1 for b in at.button if str(b.label) == "✕") == 1)
+check("rows share one entry id", len({r["detail"]["entry_id"] for r in sym}) == 1)
+check("recap shows it as one entry", sum(1 for b in at.button if str(b.label) == "✕") == 1)
 
-new_box = [t for t in at.text_input if t.label == "Symptom name"]
-check("new-symptom box is on the page", len(new_box) == 1)
-new_box[0].set_value("brain fog").run()
-[b for b in at.button if str(b.label) == "Add symptom"][0].click().run()
+btn(at, "＋ New")[0].click().run()
+box = [t for t in at.text_input if t.label == "Symptom name"]
+check("new-symptom dialog opens", len(box) == 1)
+box[0].set_value("brain fog")
+btn(at, "Add symptom")[0].click().run()
 check("adding a new symptom works", not at.exception, at)
 check("it joins the symptom list",
       "brain fog" in [t["name"] for t in SQLiteDB(os.environ["TRACKER_DB"]).ref_list("symptom_types")])
-check("and opens a line for it straight away",
-      any("brain fog" in str(m.value) for m in at.markdown))
+check("the dialog closes and a line opens for it",
+      not [t for t in at.text_input if t.label == "Symptom name"]
+      and any("brain fog" in str(m.value) for m in at.markdown))
 
-print("\nsupplements panel")
+
+def regimen_checks(kind, daily_name, daily_unit, occasional_name):
+    title = {"supplement": "supplements", "medication": "medications"}[kind]
+    print(f"\n{title} panel")
+    at = fresh()
+    open_panel(at, kind)
+    check(f"{title} renders", not at.exception, at)
+    check("daily item is checked by default",
+          any(c.label == daily_name and c.value for c in at.checkbox))
+    check("weekly / as-needed item is unchecked by default",
+          any(c.label == occasional_name and not c.value for c in at.checkbox))
+    check("only this panel's items are listed",
+          not any(c.label in ("Allergy tablet", "Vitamin D3 + K2") and c.label != daily_name
+                  for c in at.checkbox))
+    save = at.button(key="save_btn")
+    check("save and add sit side by side above the list",
+          [b.key for b in at.button][3:5] == ["save_btn", "add_btn"])
+    check("nothing to save when nothing changed", save.disabled)
+    check("and no rows are written for an untouched day",
+          SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category=kind) == [])
+
+    [c for c in at.checkbox if c.label == daily_name][0].uncheck().run()
+    check("unchecking one enables save", not at.button(key="save_btn").disabled)
+    at.button(key="save_btn").click().run()
+    check("saving a skip works", not at.exception, at)
+    ev = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category=kind)
+    check("exactly one row: the skip",
+          [(r["item"], r["detail"]["kind"]) for r in ev] == [(daily_name, "skipped")])
+
+    at = fresh()
+    open_panel(at, kind)
+    check("the skip is remembered when reopening the day",
+          any(c.label == daily_name and not c.value for c in at.checkbox))
+    [c for c in at.checkbox if c.label == daily_name][0].check().run()
+    [n for n in at.number_input if n.label == f"{daily_name} dose"][0].set_value(2.0).run()
+    at.button(key="save_btn").click().run()
+    ev = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category=kind)
+    check("re-saving replaces the skip with a dose change",
+          [(r["detail"]["kind"], r["quantity"]) for r in ev] == [("dose_changed", 2.0)])
+
+    [c for c in at.checkbox if c.label == occasional_name][0].check().run()
+    at.button(key="save_btn").click().run()
+    ev = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category=kind)
+    check("checking an occasional item logs it as taken",
+          any(r["item"] == occasional_name and r["detail"]["kind"] == "taken" for r in ev))
+
+    at = fresh()
+    open_panel(at, kind)
+    at.button(key="add_btn").click().run()
+    p = f"add_{kind}"
+    check("add dialog opens", at.text_input(key=f"{p}_name") is not None, at)
+    at.text_input(key=f"{p}_name").set_value(f"One-off {kind}")
+    at.number_input(key=f"{p}_dose").set_value(500.0)
+    at.text_input(key=f"{p}_unit").set_value("mg")
+    at.button(key=f"{p}_go").click().run()
+    check("one-off add works", not at.exception, at)
+    ev = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category=kind)
+    check("one-off is logged as an extra for the day",
+          any(r["item"] == f"One-off {kind}" and r["detail"]["kind"] == "extra" for r in ev))
+    check("the dialog closes after adding", not [t for t in at.text_input if t.key == f"{p}_name"])
+    check("extras survive alongside saved changes", len(ev) == 3)
+
+    at.button(key="add_btn").click().run()
+    at.text_input(key=f"{p}_name").set_value(f"New usual {kind}")
+    at.checkbox(key=f"{p}_usual").check().run()
+    check("ticking usual reveals how-often", at.selectbox(key=f"{p}_freq") is not None)
+    at.button(key=f"{p}_go").click().run()
+    check("adding to the usual list works", not at.exception, at)
+    check("new usual item appears checked in the daily list",
+          any(c.label == f"New usual {kind}" and c.value for c in at.checkbox))
+    cat = SQLiteDB(os.environ["TRACKER_DB"]).ref_list("supplements")
+    check(f"it is stored as a {kind}",
+          any(s["name"] == f"New usual {kind}" and s["kind"] == kind for s in cat))
+
+
+regimen_checks("supplement", "Vitamin D3 + K2", "softgel", "Iron")
+regimen_checks("medication", "Allergy tablet", "mg", "Pain reliever")
+
 at = fresh()
-open_panel(at, 3)
-check("supplements renders", not at.exception, at)
-check("daily supplement is shown as taken by default",
-      any(t.label == "Vitamin D3 + K2" and t.value for t in at.toggle))
-check("weekly supplement is shown as not taken by default",
-      any(t.label == "Probiotic (Vaginal)" and not t.value for t in at.toggle))
-save = [b for b in at.button if str(b.label) == "Save changes"]
-check("nothing to save when nothing changed", save and save[0].disabled)
-check("and no rows are written for an untouched day",
-      SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement") == [])
+open_panel(at, "supplement")
+at.button(key="add_btn").click().run()
+at.selectbox(key="add_supplement_pick").set_value("— new —")
+at.text_input(key="add_supplement_name").set_value("allergy TABLET")
+at.button(key="add_supplement_go").click().run()
+check("a medication name can't be re-added as a supplement",
+      any("already on your list as a medication" in str(w.value) for w in at.warning))
 
-[t for t in at.toggle if t.label == "Vitamin D3 + K2"][0].set_value(False).run()
-save = [b for b in at.button if str(b.label) == "Save changes"]
-check("turning one off enables save", save and not save[0].disabled)
-save[0].click().run()
-check("saving a skip works", not at.exception, at)
-sup = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")
-check("exactly one row: the skip",
-      [(r["item"], r["detail"]["kind"]) for r in sup] == [("Vitamin D3 + K2", "skipped")])
-
+print("\nhome tiles reflect the day")
 at = fresh()
-open_panel(at, 3)
-check("the skip is remembered when reopening the day",
-      any(t.label == "Vitamin D3 + K2" and not t.value for t in at.toggle))
-[t for t in at.toggle if t.label == "Vitamin D3 + K2"][0].set_value(True).run()
-[n for n in at.number_input if n.label == "softgel"][0].set_value(2.0).run()
-[b for b in at.button if str(b.label) == "Save changes"][0].click().run()
-sup = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")
-check("re-saving replaces the skip with a dose change",
-      [(r["detail"]["kind"], r["quantity"]) for r in sup] == [("dose_changed", 2.0)])
-
-at = fresh()
-open_panel(at, 3)
-form_names = [t for t in at.text_input if t.label == "Name (if new)"]
-check("add-supplement form is on the page", len(form_names) == 1)
-form_names[0].set_value("Vitamin C")
-[n for n in at.number_input if n.label == "Dose"][0].set_value(500.0)
-[t for t in at.text_input if t.label == "Unit"][0].set_value("mg")
-[b for b in at.button if str(b.label) == "Add"][0].click().run()
-check("one-off add works", not at.exception, at)
-sup = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")
-check("one-off is logged as an extra for the day",
-      any(r["item"] == "Vitamin C" and r["detail"]["kind"] == "extra" for r in sup))
-check("extras survive alongside saved changes",
-      len(SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="supplement")) == 2)
-
-form_names = [t for t in at.text_input if t.label == "Name (if new)"]
-form_names[0].set_value("Iron")
-[c for c in at.checkbox if c.label == "Part of my usual intake"][0].check()
-[b for b in at.button if str(b.label) == "Add"][0].click().run()
-check("adding to the usual list works", not at.exception, at)
-check("new usual supplement appears in the taken-today list",
-      any(t.label == "Iron" and t.value for t in at.toggle))
+labels = {b.key: str(b.label) for b in at.button}
+check("alcohol tile shows today's drinks", "3 drinks" in labels["panel_alcohol"])
+check("supplement tile shows the day was edited", "edited" in labels["panel_supplement"])
 
 print("\nhabits panel")
 at = fresh()
-open_panel(at, 4)
+open_panel(at, "habit")
 check("habits renders", not at.exception, at)
-check("binary habit is a toggle", len(at.toggle) >= 1)
-check("count habit is a stepper", len(at.number_input) >= 1)
+check("binary habit is a checkbox", len(at.checkbox) >= 1)
+check("count habit is a number box", len(at.number_input) >= 1)
 if at.number_input:
     at.number_input[0].set_value(8).run()
-sv = [b for b in at.button if str(b.label) == "Save day"]
-check("save-day button present", len(sv) == 1)
-if sv:
-    sv[0].click().run()
-    check("habits save succeeds", not at.exception, at)
+sv = at.button(key="save_btn")
+check("save-day button present above the list", str(sv.label) == "Save day")
+sv.click().run()
+check("habits save succeeds", not at.exception, at)
+check("button then reads Update day", str(at.button(key="save_btn").label) == "Update day")
 
 print("\ndate navigation + export")
 at = fresh()
-open_panel(at, 1)
-back = [b for b in at.button if str(b.label) == "◀"]
-check("previous-day button present", len(back) == 1)
-if back:
-    back[0].click().run()
-    check("stepping back a day works", not at.exception, at)
+open_panel(at, "alcohol")
+at.button(key="prev_day").click().run()
+check("stepping back a day works", not at.exception, at)
+check("the date line says Yesterday",
+      any("Yesterday" in str(p.proto.popover.label) for p in at.get("popover")))
+check("forward is enabled again", not at.button(key="next_day").disabled)
+at.button(key="back").click().run()
+check("back arrow returns home", at.button(key="panel_food") is not None and not at.exception)
 
 at = fresh()
-at.button[5].click().run()
+at.button(key="settings").click().run()
 check("export tab lists events", any("events logged" in str(m.value) for m in at.markdown), at)
 
 print("\npasscode gate")

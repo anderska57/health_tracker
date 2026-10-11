@@ -91,7 +91,7 @@ DEFAULT_HABITS = [
 
 # Frequency is free text (matching the existing health.sqlite convention:
 # "1/day", "3/week", "as needed"), with these offered as quick picks.
-SUPPLEMENT_FREQUENCIES = ["1/day", "2/day", "1/week", "2/week", "3/week", "as needed"]
+SUPPLEMENT_FREQUENCIES = ["1/day", "2/day", "3/day", "1/week", "2/week", "3/week", "as needed"]
 
 REGIMEN_STATUSES = ["active", "paused", "stopped"]
 
@@ -109,4 +109,4 @@ def is_daily(frequency: str) -> bool:
     f = (frequency or "").strip().lower()
     return f in ("daily", "every day") or f.endswith("/day") or f.endswith("/d")
 
-CATEGORIES = ["food", "alcohol", "symptom", "supplement", "habit"]
+CATEGORIES = ["food", "alcohol", "symptom", "supplement", "medication", "habit"]

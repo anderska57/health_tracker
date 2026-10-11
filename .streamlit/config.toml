@@ -1,0 +1,21 @@
+# App look. Streamlit Cloud reads this file from the repo, so changing a colour
+# here and pushing is all it takes. (secrets.toml lives in this folder too, but
+# it is gitignored -- only this file gets committed.)
+
+[theme]
+base = "dark"
+backgroundColor = "#141C24"           # deep slate, the page
+secondaryBackgroundColor = "#1E2833"  # tiles, inputs
+textColor = "#E3E8ED"
+primaryColor = "#6CC3B0"              # soft teal: Save buttons, checkmarks
+borderColor = "#2C3A47"
+baseRadius = "0.75rem"
+showWidgetBorder = true
+
+# Prefer something lighter? Swap the block above for this warm oat palette:
+# base = "light"
+# backgroundColor = "#F2EEE6"
+# secondaryBackgroundColor = "#E7E1D5"
+# textColor = "#2E2A24"
+# primaryColor = "#3F7F72"
+# borderColor = "#D6CFC1"

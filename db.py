@@ -17,6 +17,10 @@ Supplements follow the catalog/regimen split from health.sqlite: a supplement
 is stored once, and a *regimen* is a stretch of time you intended to take it a
 certain way. Restarting something after a break is a new regimen row, so
 distinct trials stay separable and "what was I on last March?" is answerable.
+
+Medications share that catalog and regimen model. A catalog row's `kind`
+column ('supplement' or 'medication') says which panel it belongs to, and
+day-level deviations are logged with category 'supplement' or 'medication'.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ _EVENT_FIELDS = (
 _SQLITE_DDL = """
 create table if not exists supplements (
     id text primary key, name text not null, brand text, form text,
+    kind text not null default 'supplement',
     sort_order integer not null default 0, created_at text not null
 );
 create table if not exists supplement_regimens (
@@ -85,6 +90,7 @@ _BOOL_COLS = {"active"}
 
 class SQLiteDB:
     kind = "sqlite"
+    supports_medications = True
 
     def __init__(self, path: str = "tracker.db"):
         self.path = path
@@ -105,6 +111,9 @@ class SQLiteDB:
                 c.execute("alter table events add column event_time text")
 
             scols = {r["name"] for r in c.execute("pragma table_info(supplements)")}
+            if scols and "brand" in scols and "kind" not in scols:
+                c.execute("alter table supplements add column kind text not null "
+                          "default 'supplement'")
             if scols and "brand" not in scols:
                 # Old flat supplements table: name/dose/frequency/active.
                 # Lift each row into a catalog entry plus one open regimen.
@@ -195,7 +204,7 @@ class SQLiteDB:
                 c.execute("delete from supplement_regimens where supplement_id = ?", (row_id,))
             c.execute(f"delete from {table} where id = ?", (row_id,))
 
-    def regimens_on(self, d: date) -> list[dict]:
+    def regimens_on(self, d: date, kind: str = "supplement") -> list[dict]:
         """Regimens in force on a given day, joined to the catalog.
 
         Membership is decided by the DATE SPAN, not by current status: a
@@ -204,15 +213,16 @@ class SQLiteDB:
         'paused' is the one status that removes a regimen from its own span,
         since a pause has no end_date to bound it.
         """
-        q = """select r.*, s.name, s.brand, s.form
+        q = """select r.*, s.name, s.brand, s.form, s.kind
                from supplement_regimens r join supplements s on s.id = r.supplement_id
                where r.status <> 'paused'
+                 and coalesce(s.kind, 'supplement') = ?
                  and r.start_date <= ?
                  and (r.end_date is null or r.end_date >= ?)
                order by s.sort_order, s.name"""
         iso = d.isoformat()
         with self._conn() as c:
-            return [self._out(r) for r in c.execute(q, (iso, iso))]
+            return [self._out(r) for r in c.execute(q, (kind, iso, iso))]
 
     # -- events -------------------------------------------------------------
 
@@ -261,6 +271,14 @@ class SupabaseDB:
     def __init__(self, url: str, key: str):
         from supabase import create_client  # imported lazily
         self.client = create_client(normalize_supabase_url(url), key.strip())
+        # Medications need the supplements.kind column (see schema.sql). Until
+        # that one-line migration has been run, everything still works except
+        # the Medications panel, which explains what to do instead.
+        try:
+            self.client.table("supplements").select("kind").limit(1).execute()
+            self.supports_medications = True
+        except Exception:
+            self.supports_medications = False
 
     def setting_get(self, key: str, default=None):
         r = self.client.table("app_settings").select("value").eq("key", key).execute().data
@@ -282,6 +300,8 @@ class SupabaseDB:
         assert table in REF_TABLES
         row = dict(row)
         row.setdefault("id", str(uuid.uuid4()))
+        if table == "supplements" and not self.supports_medications:
+            row.pop("kind", None)
         self.client.table(table).upsert(row).execute()
         return row["id"]
 
@@ -291,17 +311,22 @@ class SupabaseDB:
             self.client.table("supplement_regimens").delete().eq("supplement_id", row_id).execute()
         self.client.table(table).delete().eq("id", row_id).execute()
 
-    def regimens_on(self, d: date) -> list[dict]:
+    def regimens_on(self, d: date, kind: str = "supplement") -> list[dict]:
+        if kind != "supplement" and not self.supports_medications:
+            return []
         iso = d.isoformat()
+        cols = "name, brand, form, sort_order" + (", kind" if self.supports_medications else "")
         rows = (self.client.table("supplement_regimens")
-                .select("*, supplements(name, brand, form, sort_order)")
+                .select(f"*, supplements({cols})")
                 .neq("status", "paused").lte("start_date", iso).execute().data)
         out = []
         for r in rows:
             if r.get("end_date") and r["end_date"] < iso:
                 continue
             cat = r.pop("supplements", None) or {}
-            r.update({k: cat.get(k) for k in ("name", "brand", "form")})
+            if (cat.get("kind") or "supplement") != kind:
+                continue
+            r.update({k: cat.get(k) for k in ("name", "brand", "form", "kind")})
             r["_sort"] = cat.get("sort_order") or 0
             out.append(r)
         return sorted(out, key=lambda r: (r["_sort"], r.get("name") or ""))

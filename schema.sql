@@ -1,7 +1,7 @@
 -- Health tracker schema (Postgres / Supabase)
 -- Run this once in the Supabase SQL editor.
 --
--- Design note: one wide `events` table serves all five categories. Category-specific
+-- Design note: one wide `events` table serves every category. Category-specific
 -- fields live in `detail` (jsonb) so a new panel never needs a migration. The columns
 -- that are promoted out of jsonb -- event_date, event_time, time_bucket, category,
 -- item, quantity -- are the ones you will group by, so they stay indexable.
@@ -10,6 +10,7 @@
 -- supplement is stored once; a regimen is a stretch of time you intended to take
 -- it a certain way. Restarting after a break = a new regimen row, so separate
 -- trials stay separable and "what was I on last March?" is answerable.
+-- Medications use the same two tables; supplements.kind says which is which.
 
 create extension if not exists "pgcrypto";
 
@@ -22,6 +23,7 @@ create table if not exists supplements (
     name        text not null unique,
     brand       text,
     form        text,                 -- capsule, powder, softgel, suppository...
+    kind        text not null default 'supplement',  -- supplement | medication
     sort_order  int not null default 0,
     created_at  timestamptz not null default now()
 );
@@ -80,7 +82,7 @@ create table if not exists events (
     -- when the row was created (audit trail; live vs retrospective logging)
     logged_at    timestamptz not null default now(),
 
-    category     text not null,  -- alcohol | food | symptom | supplement | habit
+    category     text not null,  -- alcohol | food | symptom | supplement | medication | habit
     item         text,           -- drink type, food text, symptom, supplement, habit
     quantity     numeric,
     unit         text,
@@ -103,6 +105,7 @@ create index if not exists regimen_status_idx   on supplement_regimens (status);
 alter table events      add column if not exists event_time time;
 alter table supplements add column if not exists brand text;
 alter table supplements add column if not exists form  text;
+alter table supplements add column if not exists kind  text not null default 'supplement';
 
 -- ---------------------------------------------------------------------------
 -- Single-user mode: RLS on, one permissive policy for the authenticated key.
