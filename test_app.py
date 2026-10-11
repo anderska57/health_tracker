@@ -99,6 +99,9 @@ check("alcohol save succeeds", not at.exception, at)
 alc = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="alcohol")
 check("two alcohol rows saved", sorted(int(r["quantity"]) for r in alc) == [1, 2])
 check("saved rows appear in the day recap", any("wine" in str(m.value) for m in at.markdown))
+check("the recap is headed 'Logged this day' with 'delete entry' over the ✕s",
+      any("Logged this day" in str(m.value) for m in at.markdown)
+      and any("delete entry" in str(m.value) for m in at.markdown))
 
 print("\nfood panel")
 at = fresh()
@@ -109,6 +112,10 @@ check("exactly one is selected",
       sum(1 for b in at.button if b.proto.type == "primary"
           and str(b.label) in C.MEAL_SLOTS) == 1)
 check("a time input is present", len(at.time_input) == 1)
+import inspect as _i  # noqa: E402
+if "format" in _i.signature(__import__("streamlit").time_input).parameters:
+    check("times show as 12-hour with am/pm", "12" in str(at.time_input[0].proto.format) or
+          at.time_input[0].proto.format == 1)
 btn(at, "dinner")[0].click().run()
 check("picking dinner prefills its default time",
       at.time_input[0].value.strftime("%H:%M") == C.DEFAULT_MEAL_TIMES["dinner"])

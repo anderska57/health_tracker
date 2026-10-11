@@ -29,6 +29,7 @@ st.markdown("""
 <style>
   .block-container {padding: 1.6rem 0.9rem 3rem; max-width: 560px;}
   header[data-testid="stHeader"] {display: none;}   /* it sat over the back arrow */
+  .st-key-device_read, .st-key-device_write {position: absolute; height: 0; overflow: hidden;}
   [data-testid="stToolbar"], [data-testid="stDecoration"] {display: none;}
   [data-testid="stVerticalBlock"] {gap: 0.55rem;}
 
@@ -67,9 +68,9 @@ st.markdown("""
   .st-key-tiles button {height: 6.4rem; flex-direction: column; border-radius: 1rem;
       border-top-width: 4px; box-shadow: 0 1px 2px rgba(29,59,56,0.08);}
   .st-key-tiles button p {white-space: normal !important; overflow: visible !important;
-      text-overflow: clip !important; line-height: 1.3; font-size: 0.86rem !important;
-      opacity: 0.8;}
-  .st-key-tiles button p strong {font-size: 0.98rem; opacity: 1;}
+      text-overflow: clip !important; line-height: 1.3; font-size: 0.86rem !important;}
+  .st-key-tiles button p strong {font-size: 0.93rem; font-weight: 700; color: __TEXT__;
+      white-space: nowrap; letter-spacing: -0.01em;}
   .st-key-tiles button p:first-line {font-size: 1.55rem;}
   .st-key-tile_food button {border-top-color: #E0A458;}
   .st-key-tile_alcohol button {border-top-color: #C0708A;}
@@ -96,6 +97,11 @@ st.markdown("""
   /* symptom picker: scrolls once the list grows */
   .st-key-sympick [data-testid="stButtonGroup"] {gap: 0.35rem;}
 
+  .loghead {font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase;
+      font-weight: 700; margin-top: 0.5rem;}
+  .delhead {font-size: 0.78rem; text-align: right; opacity: 0.7; margin-top: 0.5rem;}
+  [class*="st-key-loghead"] [data-testid="stHorizontalBlock"] {border-bottom: none !important;
+      padding-bottom: 0 !important;}
   .sect {font-size: 0.72rem; letter-spacing: 0.07em; text-transform: uppercase;
       opacity: 0.6; margin: 0.6rem 0 0.1rem;}
   .unit {font-size: 0.82rem; opacity: 0.65; white-space: nowrap;}
@@ -104,6 +110,7 @@ st.markdown("""
   hr {margin: 0.4rem 0;}
 </style>
 """.replace("__BTN_BG__", st.get_option("theme.secondaryBackgroundColor") or "transparent")
+   .replace("__TEXT__", st.get_option("theme.textColor") or "inherit")
    .replace("__PAGE_BG__", st.get_option("theme.backgroundColor") or "transparent")
    .replace("__BORDER__", st.get_option("theme.borderColor") or "rgba(127,127,127,0.3)"),
    unsafe_allow_html=True)
@@ -113,17 +120,34 @@ st.markdown("""
 # Passcode gate
 # ---------------------------------------------------------------------------
 # Active only when APP_PASSCODE is set in secrets, so local runs stay open.
-# Three ways in: a remembered device (cookie), the passcode in the URL (?k=...),
-# or typing it. The Supabase key never leaves the server either way: Streamlit
+# Three ways in: a remembered device, the passcode in the URL (?k=...), or
+# typing it. The Supabase key never leaves the server either way: Streamlit
 # runs this Python server-side and sends only rendered UI to the browser.
 #
-# "Remember this device" stores a cookie rather than relying on the URL, because
-# iPhone home-screen web apps launch the site's start address and drop ?k=.
-# The cookie holds an HMAC of the passcode, never the passcode itself, so
-# changing APP_PASSCODE automatically locks out every remembered device.
+# "Remember this device" keeps a key in the browser's localStorage and a tiny
+# component hands it to Python. (An earlier version used a cookie, but
+# Streamlit Community Cloud's proxy strips cookies before they reach the app,
+# and Safari also caps script-set cookies at 7 days.) iPhone home-screen web
+# apps keep their own localStorage for as long as you keep using them. The key
+# is an HMAC of the passcode, never the passcode itself, so changing
+# APP_PASSCODE locks out every remembered device.
 
-REMEMBER_COOKIE = "tracker_device"
-REMEMBER_DAYS = 400   # browsers cap cookie lifetimes around here anyway
+_DEVICE_JS = """
+export default function(component) {
+  const { data, setStateValue } = component;
+  const KEY = "tracker_device";
+  let value = "";
+  try {
+    if (data && typeof data.write === "string") {
+      if (data.write) { localStorage.setItem(KEY, data.write); }
+      else { localStorage.removeItem(KEY); }
+    }
+    value = localStorage.getItem(KEY) || "";
+  } catch (e) { value = ""; }
+  setStateValue("token", value);
+}
+"""
+_device_store = st.components.v2.component("device_store", js=_DEVICE_JS)
 
 
 def _passcode_ok(supplied: str | None, secret: str) -> bool:
@@ -134,11 +158,15 @@ def _device_token(secret: str) -> str:
     return hmac.new(secret.encode(), b"tracker:remember-this-device", "sha256").hexdigest()
 
 
-def _write_cookie(value: str, max_age: int):
-    # Runs in the app's own page, so the cookie belongs to the app's origin.
-    st.html("<script>document.cookie = "
-            f"'{REMEMBER_COOKIE}={value}; path=/; max-age={max_age}; SameSite=Lax; Secure';"
-            "</script>", unsafe_allow_javascript=True)
+def _device_component(key: str, write: str | None = None) -> str | None:
+    """Mount the localStorage helper. Returns the stored key once the browser
+    has reported it ("" if none), or None before it has."""
+    data = {} if write is None else {"write": write}
+    try:
+        res = _device_store(key=key, data=data, on_token_change=lambda: None)
+        return getattr(res, "token", None)
+    except Exception:          # no browser (headless tests) or component error
+        return None
 
 
 def require_passcode():
@@ -148,30 +176,27 @@ def require_passcode():
     ss = st.session_state
 
     if ss.get("_authed"):
-        if ss.pop("_remember_pending", False):
-            # Written at the END of the page (see flush_cookie). Writing it here,
-            # above everything else, shifted the page and left ghost copies of
-            # home-screen buttons on later screens.
-            ss._cookie_out = (_device_token(secret), REMEMBER_DAYS * 86400)
+        if "_remember_pending" in ss:
+            # Saved at the END of the page (see flush_device_store): putting an
+            # element above everything else shifted the page and left ghost
+            # copies of home-screen buttons on later screens.
+            ss._device_write = _device_token(secret) if ss.pop("_remember_pending") else ""
         return
-
-    if ss.pop("_forget_pending", False):
-        _write_cookie("", 0)
-    elif not ss.get("_ignore_cookie"):
-        try:
-            cookie = st.context.cookies.get(REMEMBER_COOKIE)
-        except Exception:          # no browser context (e.g. headless tests)
-            cookie = None
-        if isinstance(cookie, str) and cookie and \
-                hmac.compare_digest(cookie.encode(), _device_token(secret).encode()):
-            ss._authed = True
-            return
 
     if _passcode_ok(st.query_params.get("k"), secret):
         ss._authed = True
         return
 
+    forget = ss.pop("_forget_pending", False)
+    stored = _device_component("device_read", "" if forget else None)
+    if (stored and not forget and not ss.get("_ignore_device")
+            and hmac.compare_digest(stored.encode(), _device_token(secret).encode())):
+        ss._authed = True
+        return
+
     st.markdown("## 🔒 Tracker")
+    if stored is None and not ss.get("_ignore_device"):
+        st.caption("Checking for a remembered device…")
     with st.form("passcode"):
         pw = st.text_input("Passcode", type="password")
         remember = st.checkbox("Remember this device", value=True)
@@ -179,16 +204,17 @@ def require_passcode():
             if _passcode_ok(pw, secret):
                 ss._authed = True
                 ss._remember_pending = remember
+                ss.pop("_ignore_device", None)
                 st.rerun()
             st.error("That passcode didn't match.")
     st.stop()
 
 
-def flush_cookie():
-    """Called once the page is drawn, so the cookie-writing snippet sits below it."""
-    out = st.session_state.pop("_cookie_out", None)
-    if out:
-        _write_cookie(*out)
+def flush_device_store():
+    """Called once the page is drawn, so the helper sits below everything else."""
+    write = st.session_state.pop("_device_write", None)
+    if write is not None:
+        _device_component("device_write", write)
 
 
 def lock_device():
@@ -196,7 +222,7 @@ def lock_device():
     ss = st.session_state
     ss._authed = False
     ss._forget_pending = True
-    ss._ignore_cookie = True      # this session's cookie snapshot is now stale
+    ss._ignore_device = True      # don't let this session's last reading log you back in
     st.rerun()
 
 
@@ -292,6 +318,14 @@ def kind_of(s: dict) -> str:
     return s.get("kind") or "supplement"
 
 
+def logged_header(title: str = "Logged this day", key: str = "loghead"):
+    """Bold section title, with 'delete entry' right-aligned over the ✕ buttons."""
+    with st.container(key=key):
+        c1, c2 = st.columns([3.4, 2.3], vertical_alignment="bottom")
+        c1.markdown(f"<div class='loghead'>{title}</div>", unsafe_allow_html=True)
+        c2.markdown("<div class='delhead'>delete entry</div>", unsafe_allow_html=True)
+
+
 def section(label: str):
     st.markdown(f"<div class='sect'>{label}</div>", unsafe_allow_html=True)
 
@@ -310,6 +344,13 @@ def slot_default_time(slot: str) -> dtime:
     except (ValueError, TypeError):
         hh, mm = C.DEFAULT_MEAL_TIMES[slot].split(":")
         return dtime(int(hh), int(mm))
+
+
+# 12-hour clock with am/pm where this Streamlit version supports it (Cloud
+# installs the newest; older local installs fall back to 24-hour).
+import inspect as _inspect
+TIME_FMT = ({"format": "12h"} if "format" in _inspect.signature(st.time_input).parameters
+            else {})
 
 
 def fmt_time(value) -> str:
@@ -430,7 +471,7 @@ def home():
             for col, (cat, icon, label) in zip(cols, PANELS[i:i + 3]):
                 status = _tile_status(cat, by_cat.get(cat, []))
                 with col.container(key=f"tile_{cat}"):
-                    if st.button(f"{icon}  \n**{label}**  \n{status}", key=f"panel_{cat}",
+                    if st.button(f"{icon}  \n**{label}**  \n:gray[{status}]", key=f"panel_{cat}",
                                  width='stretch'):
                         st.session_state.log_date = date.today()
                         go(cat)
@@ -496,7 +537,7 @@ def panel_alcohol():
 
     existing = day_events(d, "alcohol")
     if existing:
-        section("Logged this day")
+        logged_header()
         with st.container(key="list_logged"):
             for e in existing:
                 c1, c2 = st.columns([5, 0.7], vertical_alignment="center")
@@ -535,7 +576,7 @@ def panel_food():
                         placeholder="oatmeal with blueberries and peanut butter, black coffee",
                         label_visibility="collapsed")
     c1, c2 = st.columns([1.3, 1], vertical_alignment="center")
-    when = c1.time_input("time", value=slot_default_time(slot),
+    when = c1.time_input("time", value=slot_default_time(slot), **TIME_FMT,
                          key=f"food_time_{rev}", step=300,
                          label_visibility="collapsed")
     if c2.button("Save", type="primary", width='stretch') and text.strip():
@@ -551,7 +592,7 @@ def panel_food():
 
     existing = day_events(d, "food")
     if existing:
-        section("Logged this day")
+        logged_header()
         with st.container(key="list"):
             for e in existing:
                 c1, c2 = st.columns([5, 0.7], vertical_alignment="center")
@@ -713,7 +754,7 @@ def panel_symptoms():
         for e in existing:
             gid = (e.get("detail") or {}).get("entry_id") or e["id"]
             groups.setdefault(gid, []).append(e)
-        section("Logged this day · ✕ deletes the entry")
+        logged_header()
         with st.container(key="list_logged"):
             for gid, rows in groups.items():
                 first = rows[0]
@@ -983,7 +1024,7 @@ def panel_regimen(kind: str):
                     wanted.add(("taken", r["id"], dose, purpose))
 
         if extras:
-            section("Also taken this day")
+            logged_header("Also taken this day", key="loghead_extras")
             for e in extras:
                 c1, c2 = st.columns([5, 0.7], vertical_alignment="center")
                 amt = f" · {fmt_qty(e['quantity'])} {e.get('unit') or ''}".rstrip() \
@@ -1204,7 +1245,7 @@ def panel_settings():
         st.caption("Prefilled when you pick that occasion on the food panel. "
                    "Snacks always default to the current time.")
         for slot in ("breakfast", "lunch", "dinner"):
-            picked = st.time_input(slot.title(), value=slot_default_time(slot),
+            picked = st.time_input(slot.title(), value=slot_default_time(slot), **TIME_FMT,
                                    step=300, key=f"mt_{slot}")
             stored = slot_default_time(slot)
             if picked != stored:
@@ -1294,4 +1335,4 @@ ROUTES = {
 }
 
 ROUTES.get(st.session_state.panel, home)()
-flush_cookie()
+flush_device_store()

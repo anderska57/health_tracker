@@ -61,13 +61,15 @@ APP_PASSCODE = "four random words here"
 With it set, the app shows only a passcode box until unlocked. With no
 `APP_PASSCODE` (e.g. running locally) there is no gate.
 
-**Remember this device** (on by default) stores a cookie so the device opens
-straight in next time — including iPhone home-screen apps, which can't rely on
-the URL because web-app mode launches the site's start address. The cookie
-holds an HMAC of the passcode, not the passcode, so changing `APP_PASSCODE`
-locks out every remembered device at once. **Lock this device** on the home
-screen deletes the cookie. Browsers may still expire it on their own after a
-stretch without use.
+**Remember this device** (on by default) saves a key in the browser's
+localStorage, and a tiny `st.components.v2` component hands it back to Python
+on the next visit — so the device opens straight in, including iPhone
+home-screen apps, which can't rely on the URL because web-app mode launches the
+site's start address. A cookie doesn't work here: Streamlit Community Cloud's
+proxy strips cookies before they reach the app, and Safari caps script-set
+cookies at 7 days. The key is an HMAC of the passcode, not the passcode, so
+changing `APP_PASSCODE` locks out every remembered device at once. **Lock this
+device** on the home screen deletes it.
 
 The passcode can also ride in the URL — `?k=<passcode>` — which works in a
 normal browser tab but puts the passcode in the address itself.
