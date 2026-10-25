@@ -12,6 +12,7 @@ Design rules this app is built around:
 from __future__ import annotations
 
 import hmac
+import json
 import uuid
 from datetime import date, datetime, time as dtime, timedelta
 
@@ -107,6 +108,11 @@ st.markdown("""
   .unit {font-size: 0.82rem; opacity: 0.65; white-space: nowrap;}
   .ref {opacity: 0.6; font-size: 0.78rem; line-height: 1.5;}
   .recap {opacity: 0.7; font-size: 0.85rem;}
+  .steplabel {opacity: 0.75; font-size: 0.85rem; margin: 0.1rem 0 0.35rem;}
+  /* completeness ranges: five across on a phone */
+  [class*="st-key-list_comp"] [data-testid="stButtonGroup"] {gap: 0.3rem;}
+  [class*="st-key-list_comp"] [data-testid="stButtonGroup"] button {padding: 0.2rem 0.55rem;
+      min-height: 2.1rem;}
   hr {margin: 0.4rem 0;}
 </style>
 """.replace("__BTN_BG__", st.get_option("theme.secondaryBackgroundColor") or "transparent")
@@ -267,6 +273,8 @@ st.session_state.setdefault("flash", None)
 
 def go(panel: str | None):
     st.session_state.panel = panel
+    if panel in (None, "review"):
+        st.session_state.pop("_back_to", None)
     st.session_state.pop("_dialog", None)
     st.session_state.alc_lines = []
     st.session_state.sym_lines = []
@@ -396,7 +404,8 @@ def topbar(title: str):
     with st.container(key="topbar"):
         c1, c2, c3 = st.columns([1, 4.2, 1], vertical_alignment="center")
         if c1.button("←", key="back"):
-            go(None)
+            # Panels opened from the weekly review return to it.
+            go(st.session_state.get("_back_to"))
         c2.markdown(f"<div class='ptitle'>{title}</div>", unsafe_allow_html=True)
 
 
@@ -434,9 +443,19 @@ def action_bar():
 # Home
 # ---------------------------------------------------------------------------
 
+def habits_done(d: date, rows: list[dict]) -> int:
+    """Habits done on a day, counting usual habits that weren't unchecked."""
+    explicit = {r["item"]: r for r in rows}
+    plans = habit_plans()
+    return sum(1 for h in ref_rows("habits")
+               if (habit_value(h, d, explicit, plans)[0] or 0) > 0)
+
+
 def _tile_status(cat: str, rows: list[dict]) -> str:
     if cat in ("supplement", "medication"):
         return "edited" if rows else "as usual"
+    if cat == "habit" and ref_rows("habits"):
+        return f"{habits_done(date.today(), rows)} done"
     if not rows:
         return "—"
     if cat == "alcohol":
@@ -445,10 +464,13 @@ def _tile_status(cat: str, rows: list[dict]) -> str:
     if cat == "symptom":
         n = len({(r.get("detail") or {}).get("entry_id") or r["id"] for r in rows})
         return f"{n} logged"
-    if cat == "habit":
-        n = sum(1 for r in rows if r.get("quantity"))
-        return f"{n} done"
     return f"{len(rows)} logged"
+
+
+def open_review(ws: date):
+    st.session_state.review_week = ws
+    st.session_state.review_step = 0
+    go("review")
 
 
 def home():
@@ -476,10 +498,18 @@ def home():
                         st.session_state.log_date = date.today()
                         go(cat)
 
+    target = review_target(today)
+    due = target.isoformat() not in reviewed_weeks()
+    if due and st.button(f"📋  Review your week · {week_label(target)}", key="review_card",
+                         type="primary", width='stretch'):
+        open_review(target)
+
     st.write("")
     with st.container(horizontal=True, vertical_alignment="center"):
         st.caption(f"storage: {db.kind}")
         st.space("stretch")
+        if not due and st.button("📋 Weekly review", key="review_link", type="tertiary"):
+            open_review(target)
         if _secret("APP_PASSCODE") and st.button("🔒 Lock this device", key="lock_device",
                                                   type="tertiary"):
             lock_device()
@@ -1083,54 +1113,729 @@ def panel_medications():
 # Habits
 # ---------------------------------------------------------------------------
 
+# Habits come in two flavours, chosen per habit:
+#   * plain: nothing is assumed; tick it (or enter a count) on the days you did it.
+#   * usual: assumed done on its scheduled days from a start date, the way the
+#     usual supplement list works. Only days that differ get a row.
+# The schedule lives in app_settings under one key (JSON keyed by habit id), so
+# it needed no database change. When a schedule is switched off or changed,
+# the days it covered are first written out as ordinary rows ("frozen"), so
+# history never changes after the fact.
+
+HABIT_PLANS_KEY = "habit_usual"
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+HABIT_FREQS = {"every day": list(range(7)), "weekdays": [0, 1, 2, 3, 4], "pick days": None}
+HABIT_KIND_LABELS = {"binary": "yes / no", "count": "count"}
+
+
+def habit_plans() -> dict:
+    ss = st.session_state
+    if "_habit_plans" not in ss:
+        raw = db.setting_get(HABIT_PLANS_KEY)
+        try:
+            ss._habit_plans = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            ss._habit_plans = {}
+    return ss._habit_plans
+
+
+def save_habit_plans(plans: dict):
+    db.setting_set(HABIT_PLANS_KEY, json.dumps(plans))
+    st.session_state._habit_plans = plans
+
+
+def habit_assumed(h: dict, d: date, plans: dict | None = None) -> float | None:
+    """The value a usual habit is assumed to have on day d, or None if nothing
+    is assumed that day (plain habit, before its start, or not a scheduled day)."""
+    p = (plans if plans is not None else habit_plans()).get(h["id"])
+    if not p or d < date.fromisoformat(p["since"]) or d.weekday() not in p.get("days", []):
+        return None
+    return float(p.get("amount") or 1) if h["kind"] == "count" else 1.0
+
+
+def describe_days(days: list[int]) -> str:
+    days = sorted(days or [])
+    for label, ds in HABIT_FREQS.items():
+        if ds == days:
+            return label
+    return ", ".join(WEEKDAYS[i] for i in days)
+
+
+def describe_plan(h: dict, p: dict) -> str:
+    since = date.fromisoformat(p["since"])
+    amt = f", usually {float(p.get('amount') or 1):g} {h.get('unit') or ''}".rstrip() \
+        if h["kind"] == "count" else ""
+    return f"usually done {describe_days(p.get('days'))}{amt} · since {since:%b} {since.day}"
+
+
+def habit_value(h: dict, d: date, explicit: dict, plans: dict) -> tuple[float | None, str]:
+    """(value, source) for one habit on one day. source is 'logged', 'usual' or
+    '' (nothing known). `explicit` maps habit name -> that day's row."""
+    e = explicit.get(h["name"])
+    if e is not None:
+        return float(e.get("quantity") or 0), "logged"
+    a = habit_assumed(h, d, plans)
+    if a is not None:
+        return a, "usual"
+    return None, ""
+
+
+def freeze_habit(h: dict, plan: dict, upto: date):
+    """Write out the days a usual schedule covered (since .. the day before
+    `upto`) as ordinary rows, wherever the day doesn't already have one."""
+    start, end = date.fromisoformat(plan["since"]), upto - timedelta(days=1)
+    if end < start:
+        return
+    have = {str(e["event_date"])[:10]
+            for e in db.events_fetch(start=start, end=end, category="habit", limit=100000)
+            if e.get("item") == h["name"]}
+    amount = float(plan.get("amount") or 1) if h["kind"] == "count" else 1.0
+    rows, day = [], start
+    while day <= end:
+        if day.weekday() in plan.get("days", []) and day.isoformat() not in have:
+            rows.append({"event_date": day, "category": "habit", "item": h["name"],
+                         "quantity": amount, "unit": h.get("unit") or (
+                             "done" if h["kind"] == "binary" else None),
+                         "detail": {"kind": h["kind"], "from_usual": True}})
+        day += timedelta(days=1)
+    db.events_insert(rows)
+
+
+def set_habit_plan(h: dict, new: dict | None):
+    """Switch a habit's usual schedule on, off, or to a new shape."""
+    plans = dict(habit_plans())
+    old = plans.get(h["id"])
+    if old and new and old.get("days") == new.get("days") \
+            and old.get("amount") == new.get("amount"):
+        return                                    # nothing changed
+    if old:
+        freeze_habit(h, old, date.today())
+        if new:
+            new = {**new, "since": date.today().isoformat()}
+    if new:
+        plans[h["id"]] = new
+    else:
+        plans.pop(h["id"], None)
+    save_habit_plans(plans)
+
+
+def habit_usual_inputs(prefix: str, kind: str, *, current: dict | None = None,
+                       start_default: date | None = None):
+    """'I usually do this' + how often (+ usual amount for counts). Returns
+    (usual?, plan-without-since, start date or None, problem or None)."""
+    usual = st.checkbox("I usually do this", value=bool(current), key=f"{prefix}_usual",
+                        help="It's checked automatically on the days you pick. "
+                             "Uncheck it on days you didn't.")
+    if not usual:
+        return False, None, None, None
+    days0 = (current or {}).get("days", HABIT_FREQS["every day"])
+    freq0 = next((k for k, v in HABIT_FREQS.items() if v == sorted(days0)), "pick days")
+    freq = st.segmented_control("How often", list(HABIT_FREQS), default=freq0,
+                                key=f"{prefix}_freq") or "every day"
+    if freq == "pick days":
+        picked = st.pills("Days", WEEKDAYS, selection_mode="multi", key=f"{prefix}_days",
+                          default=[WEEKDAYS[i] for i in days0] if freq0 == "pick days" else None)
+        days = [WEEKDAYS.index(x) for x in (picked or [])]
+    else:
+        days = HABIT_FREQS[freq]
+    amount = None
+    if kind == "count":
+        amount = st.number_input("Usual amount", min_value=0.0, step=1.0, format="%g",
+                                 value=float((current or {}).get("amount") or 1),
+                                 key=f"{prefix}_amount")
+    start = None
+    if start_default is not None:
+        start = st.date_input("Starting", value=start_default, max_value=date.today(),
+                              format="MM/DD/YYYY", key=f"{prefix}_start")
+    problem = None if days else "Pick at least one day."
+    return True, {"days": sorted(days), **({"amount": amount} if amount is not None else {})}, \
+        start, problem
+
+
+@st.dialog("New habit", on_dismiss=close_dialog)
+def new_habit_dialog(d: date):
+    name = st.text_input("Habit name", placeholder="e.g. stretch", key="nh_name")
+    kind_lbl = st.segmented_control("Type", list(HABIT_KIND_LABELS.values()),
+                                    default="yes / no", key="nh_kind") or "yes / no"
+    kind = "count" if kind_lbl == "count" else "binary"
+    unit, goal = "", None
+    if kind == "count":
+        c1, c2 = st.columns(2)
+        unit = c1.text_input("Unit", placeholder="glasses, min", key="nh_unit")
+        goal = c2.number_input("Goal (optional)", min_value=0.0, step=1.0, format="%g",
+                               value=None, key="nh_goal")
+    usual, plan, _, problem = habit_usual_inputs("nh", kind)
+    if usual:
+        st.caption(f"Counted as done from {d:%b} {d.day} (the day you're on). "
+                   "To start earlier, go back to that day first.")
+    # Never disabled: on a phone the typed name only reaches the app when the
+    # box loses focus, so a button waiting for it would swallow the first tap.
+    if st.button("Add habit", type="primary", width='stretch', key="nh_go"):
+        name = (name or "").strip()
+        everything = db.ref_list("habits", active_only=False)
+        match = next((h for h in everything if h["name"].lower() == name.lower()), None)
+        if not name:
+            st.warning("Give the habit a name.")
+        elif match and match.get("active", True):
+            st.warning(f"{match['name']} is already on your list.")
+        elif problem:
+            st.warning(problem)
+        else:
+            row = {"name": name, "kind": kind, "unit": (unit or "").strip() or None,
+                   "target": goal, "active": True, "sort_order": len(everything)}
+            if match:                      # a retired habit with this name: bring it back
+                row = {**match, **row, "sort_order": match.get("sort_order", 0)}
+            hid = db.ref_upsert("habits", row)
+            if usual:
+                plans = dict(habit_plans())
+                plans[hid] = {**plan, "since": d.isoformat()}
+                save_habit_plans(plans)
+            bust_refs()
+            flash(f"Added {name}.")
+            close_dialog()
+            st.rerun()
+
+
+def habit_rows_for_day(habits: list[dict], d: date, values: dict[str, float],
+                       plans: dict) -> list[dict]:
+    """Rows to store for one day. Usual habits only get a row when the day
+    differs from usual; plain habits always get one (0 = didn't)."""
+    rows = []
+    for h in habits:
+        v = values[h["name"]]
+        a = habit_assumed(h, d, plans)
+        if a is not None and abs(v - a) < 1e-9:
+            continue
+        detail = {"kind": h["kind"], **({"usual": a} if a is not None else {})}
+        rows.append({"event_date": d, "time_bucket": None, "category": "habit",
+                     "item": h["name"], "quantity": v,
+                     "unit": h.get("unit") or ("done" if h["kind"] == "binary" else None),
+                     "detail": detail})
+    return rows
+
+
 def panel_habits():
     d = header("Habits")
     habits = ref_rows("habits")
-    if not habits:
-        st.info("No habits defined yet. Add them in Settings (⚙️ on the home screen).")
-        return
-
-    existing = {e["item"]: e for e in day_events(d, "habit")}
+    plans = habit_plans()
     bar = action_bar()
 
+    if dialog_is("new_habit"):
+        new_habit_dialog(d)
+
+    if not habits:
+        with bar:
+            if st.button("＋ New habit", width='stretch', key="add_btn"):
+                open_dialog("new_habit")
+                st.rerun()
+        st.markdown("**What habits do you want to track?**  \nAdd each one as a yes/no "
+                    "or a count. Habits you usually do can be checked automatically.")
+        return
+
+    # Only rows for habits on the list: a retired habit's old rows are left alone.
+    names = {h["name"] for h in habits}
+    existing_rows = [e for e in day_events(d, "habit") if e["item"] in names]
+    existing = {e["item"]: e for e in existing_rows}
+    usual_today = [h for h in habits if habit_assumed(h, d, plans) is not None]
+    plain_today = [h for h in habits if h not in usual_today]
+
     values: dict[str, float] = {}
+
+    def habit_row(h: dict):
+        v, _ = habit_value(h, d, existing, plans)
+        # The date is part of every key: otherwise a box ticked on one day
+        # kept its tick when you moved to another day.
+        if h["kind"] == "binary":
+            (c1,) = st.columns(1)     # a column row, so it gets the row divider
+            values[h["name"]] = 1.0 if c1.checkbox(
+                h["name"], value=bool(v), key=f"hb_{d}_{h['id']}") else 0.0
+        else:
+            c1, c2, c3 = st.columns([4.6, 1.35, 1.25], vertical_alignment="center")
+            target = f" <span class='unit'>goal {h['target']:g}</span>" if h.get("target") else ""
+            c1.markdown(f"{h['name']}{target}", unsafe_allow_html=True)
+            values[h["name"]] = float(c2.number_input(
+                h["name"], min_value=0.0, step=1.0, format="%g",
+                value=float(v or 0), key=f"hc_{d}_{h['id']}", label_visibility="collapsed"))
+            c3.markdown(f"<span class='unit'>{h.get('unit') or ''}</span>",
+                        unsafe_allow_html=True)
+
     with st.container(key="list"):
-        for h in habits:
-            prior = existing.get(h["name"])
-            if h["kind"] == "binary":
-                (c1,) = st.columns(1)     # a column row, so it gets the row divider
-                done = c1.checkbox(h["name"], value=bool(prior and prior["quantity"]),
-                                   key=f"hb_{h['id']}")
-                values[h["name"]] = 1 if done else 0
-            else:
-                c1, c2, c3 = st.columns([4.6, 1.35, 1.25], vertical_alignment="center")
-                target = f" <span class='unit'>goal {h['target']:g}</span>" if h.get("target") else ""
-                c1.markdown(f"{h['name']}{target}", unsafe_allow_html=True)
-                values[h["name"]] = c2.number_input(
-                    h["name"], min_value=0.0, step=1.0, format="%g",
-                    value=float(prior["quantity"]) if prior else 0.0,
-                    key=f"hc_{h['id']}", label_visibility="collapsed")
-                c3.markdown(f"<span class='unit'>{h.get('unit') or ''}</span>",
+        if usual_today:
+            section("Usually done — uncheck if you didn't")
+            for h in usual_today:
+                habit_row(h)
+        if plain_today:
+            if usual_today:
+                section("Check what you did")
+            for h in plain_today:
+                habit_row(h)
+
+    rows = habit_rows_for_day(habits, d, values, plans)
+    wanted = {(r["item"], float(r["quantity"])) for r in rows}
+    by_name = {h["name"]: h for h in habits}
+    # A stored row that just repeats the usual value says nothing new.
+    stored = {(n, float(e.get("quantity") or 0)) for n, e in existing.items()
+              if habit_assumed(by_name[n], d, plans) != float(e.get("quantity") or 0)}
+    changed = wanted != stored
+    with bar:
+        c1, c2 = st.columns(2)
+        label = ("No changes" if not changed else "Save changes" if existing else "Save day")
+        save = c1.button(label, type="primary", width='stretch', key="save_btn",
+                         disabled=not changed)
+        if c2.button("＋ New habit", width='stretch', key="add_btn"):
+            open_dialog("new_habit")
+            st.rerun()
+    if save:
+        for e in existing_rows:
+            db.event_delete(e["id"])
+        db.events_insert(rows)
+        flash("Habits saved.")
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Weekly review
+# ---------------------------------------------------------------------------
+# Four short steps: what the week looks like, fill the gaps, how complete
+# each category was, anything unusual. Saved as one `events` row with
+# category 'review', dated the week's Monday; the answers live in `detail`:
+#   completeness  {category: {"band": "80–100%", "low": 80, "high": 100}}
+#   gaps          {"alcohol"|"symptom": {"YYYY-MM-DD": "none"|"unsure"}}
+#                 (days with nothing logged: "none" = it didn't happen)
+#   usual_check   {"supplement"|"medication": "all"|"missed"}
+#   tags, other_note
+# Answers survive jumping out to fix a day: they're kept in a per-week draft.
+
+REVIEW_STEPS = ["Your week", "Fill the gaps", "How complete?", "Anything unusual?"]
+CATEGORY_LABELS = {"food": "Food & drink", "alcohol": "Alcohol", "symptom": "Symptoms",
+                   "supplement": "Supplements", "medication": "Medications",
+                   "habit": "Habits"}
+GAP_CATEGORIES = ("alcohol", "symptom")
+GAP_CHOICES = {"none": "none", "not sure": "unsure"}
+USUAL_CHOICES = {"all taken as listed": "all", "missed some": "missed"}
+
+
+def band_label(lo: int, hi: int) -> str:
+    return f"{lo}–{hi}%"
+
+
+# Shown without the % sign so all five fit on one line; stored with it.
+BAND_BY_LABEL = {f"{lo}–{hi}": (lo, hi) for lo, hi in C.COMPLETENESS_BANDS}
+_BAND_SHOWN = {band_label(lo, hi): f"{lo}–{hi}" for lo, hi in C.COMPLETENESS_BANDS}
+
+
+def week_start(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
+def review_target(today: date | None = None) -> date:
+    """The week the review card offers: the one ending today on a Sunday,
+    otherwise last week."""
+    today = today or date.today()
+    ws = week_start(today)
+    return ws if today.weekday() == 6 else ws - timedelta(days=7)
+
+
+def week_label(ws: date) -> str:
+    we = ws + timedelta(days=6)
+    tail = f"{we.day}" if we.month == ws.month else f"{we:%b} {we.day}"
+    return f"{ws:%b} {ws.day} – {tail}"
+
+
+def reviewed_weeks() -> set[str]:
+    ss = st.session_state
+    if "_reviewed" not in ss:
+        ss._reviewed = {str(e["event_date"])[:10]
+                        for e in db.events_fetch(category=C.REVIEW_CATEGORY, limit=1000)}
+    return ss._reviewed
+
+
+def jump(cat: str, d: date):
+    """Open a panel on a given day, with the back arrow returning to the review."""
+    st.session_state.log_date = d
+    st.session_state._back_to = "review"
+    go(cat)
+
+
+def _edate(e: dict) -> date:
+    return date.fromisoformat(str(e["event_date"])[:10])
+
+
+def _days(ds) -> str:
+    return ", ".join(f"{d:%a}" for d in sorted(set(ds)))
+
+
+def _week_regimens(kind: str, ws: date, we: date, daily_only: bool = False) -> list[dict]:
+    """Regimens of a kind in force at any point in the week (from the cached lists)."""
+    cat = {s["id"]: s for s in ref_rows("supplements") if kind_of(s) == kind}
+    out = []
+    for r in ref_rows("supplement_regimens"):
+        if r["supplement_id"] not in cat or r.get("status") == "paused":
+            continue
+        if str(r["start_date"])[:10] > we.isoformat():
+            continue
+        if r.get("end_date") and str(r["end_date"])[:10] < ws.isoformat():
+            continue
+        if daily_only and not C.is_daily(r.get("frequency")):
+            continue
+        out.append({**r, "name": cat[r["supplement_id"]]["name"]})
+    return out
+
+
+def _regimen_summary(kind: str, evs: list[dict], ws: date, we: date) -> list[str]:
+    by: dict[tuple[str, str], list[date]] = {}
+    for e in evs:
+        det = e.get("detail") or {}
+        k = det.get("kind")
+        if k == "exception":
+            k = det.get("exception")
+        label = {"skipped": "skipped", "dose_changed": "dose changed",
+                 "taken": "took", "extra": "extra"}.get(k)
+        if label and e.get("item"):
+            by.setdefault((label, e["item"]), []).append(_edate(e))
+    lines = [f"{label} {item} · {_days(ds)}" for (label, item), ds in sorted(by.items())]
+    if not lines:
+        if _week_regimens(kind, ws, we):
+            return ["usual list every day"]
+        return ["nothing set up"]
+    return lines
+
+
+def _habit_summary(evs: list[dict], days: list[date]) -> list[str]:
+    habits = ref_rows("habits")
+    if not habits:
+        return ["no habits yet"]
+    plans = habit_plans()
+    by_day: dict[date, dict] = {}
+    for e in evs:
+        by_day.setdefault(_edate(e), {})[e["item"]] = e
+    lines = []
+    for h in habits:
+        vals = [habit_value(h, d, by_day.get(d, {}), plans)[0] for d in days]
+        known = [v for v in vals if v is not None]
+        blank = len(vals) - len(known)
+        tail = f" · {blank} blank" if blank else ""
+        if h["kind"] == "binary":
+            lines.append(f"{h['name']} · done {sum(1 for v in known if v > 0)} of "
+                         f"{len(days)} days{tail}")
+        else:
+            total = sum(known)
+            lines.append(f"{h['name']} · {total:g} {h.get('unit') or ''} total".rstrip()
+                         + tail)
+    return lines
+
+
+def week_summary(ws: date, by_cat: dict[str, list[dict]], days: list[date]) -> dict[str, list[str]]:
+    we = ws + timedelta(days=6)
+    out: dict[str, list[str]] = {}
+
+    food = by_cat.get("food", [])
+    fd = {_edate(e) for e in food}
+    out["food"] = [f"{len(food)} entr{'ies' if len(food) != 1 else 'y'} on {len(fd)} of "
+                   f"{len(days)} days"] if food \
+        else ["nothing logged"]
+
+    alc = by_cat.get("alcohol", [])
+    per: dict[date, int] = {}
+    for e in alc:
+        per[_edate(e)] = per.get(_edate(e), 0) + int(e.get("quantity") or 0)
+    if alc:
+        total = sum(per.values())
+        detail = ", ".join(f"{d:%a} {n}" for d, n in sorted(per.items()))
+        out["alcohol"] = [f"{total} drink{'s' if total != 1 else ''} on {len(per)} "
+                          f"day{'s' if len(per) != 1 else ''} · {detail}"]
+    else:
+        out["alcohol"] = ["nothing logged"]
+
+    entries: dict[str, dict] = {}
+    for e in by_cat.get("symptom", []):
+        gid = (e.get("detail") or {}).get("entry_id") or e["id"]
+        entries.setdefault(gid, e)
+    per_sym: dict[str, list[dict]] = {}
+    for e in entries.values():
+        per_sym.setdefault(e["item"], []).append(e)
+    out["symptom"] = [
+        f"{name} · {_days(_edate(e) for e in es)} · worst {max(e.get('severity') or 0 for e in es)}/5"
+        for name, es in sorted(per_sym.items())] or ["nothing logged"]
+
+    out["supplement"] = _regimen_summary("supplement", by_cat.get("supplement", []), ws, we)
+    out["medication"] = _regimen_summary("medication", by_cat.get("medication", []), ws, we)
+    out["habit"] = _habit_summary(by_cat.get("habit", []), days)
+    return out
+
+
+def _rv_init(key: str, draft: dict, saved, default=None):
+    """Give a review widget its starting value: the draft (answers given before
+    jumping out to fix a day), else the saved review, else the default."""
+    ss = st.session_state
+    if key in ss:
+        return
+    if key in draft:
+        ss[key] = draft[key]
+    elif saved is not None:
+        ss[key] = saved
+    elif default is not None:
+        ss[key] = default
+
+
+def _review_add_body(kind: str, ws: date):
+    days = [ws + timedelta(days=i) for i in range(7) if ws + timedelta(days=i) <= date.today()]
+    labels = {f"{d:%a} {d:%b} {d.day}": d for d in days}
+    pick = st.pills("Which day?", list(labels), selection_mode="single",
+                    default=list(labels)[0], key=f"rva_{kind}_{ws}_day")
+    d = labels.get(pick) or days[0]
+    st.caption("If it's part of your usual routine, this is the day it starts.")
+    _add_dialog_body(kind, d, db.regimens_on(d, kind), False)
+
+
+_REVIEW_ADD = {k: st.dialog(f"Add a {v['noun']}", on_dismiss=close_dialog)(_review_add_body)
+               for k, v in REGIMEN_KINDS.items()}
+
+
+def _day_picker(label: str, cat: str, days: list[date], key: str):
+    """'Edit' popover: tap a day to open that panel on that day."""
+    with st.popover(label, width='stretch'):
+        for d in days:
+            if st.button(day_label(d), key=f"{key}_{d}", width='stretch'):
+                jump(cat, d)
+
+
+def panel_review():
+    ss = st.session_state
+    topbar("Weekly review")
+    ws = ss.get("review_week") or review_target()
+    we = ws + timedelta(days=6)
+    step = ss.setdefault("review_step", 0)
+
+    with st.container(key="datebar"):
+        c1, c2, c3 = st.columns([1, 4.2, 1], vertical_alignment="center")
+        if c1.button("◀", key="prev_week", width='stretch', help="Previous week"):
+            ss.review_week, ss.review_step = ws - timedelta(days=7), 0
+            st.rerun()
+        done = ws.isoformat() in reviewed_weeks()
+        c2.markdown(f"<div class='ptitle' style='font-size:1.05rem'>{week_label(ws)}"
+                    f"{' ✓' if done else ''}</div>", unsafe_allow_html=True)
+        if c3.button("▶", key="next_week", width='stretch', help="Next week",
+                     disabled=ws + timedelta(days=7) > review_target()):
+            ss.review_week, ss.review_step = ws + timedelta(days=7), 0
+            st.rerun()
+    show_flash()
+
+    days = [ws + timedelta(days=i) for i in range(7) if ws + timedelta(days=i) <= date.today()]
+    evs = db.events_fetch(start=ws, end=we, limit=5000)
+    by_cat: dict[str, list[dict]] = {}
+    for e in evs:
+        by_cat.setdefault(e["category"], []).append(e)
+    saved_row = next((e for e in by_cat.get(C.REVIEW_CATEGORY, [])
+                      if _edate(e) == ws), None)
+    saved = (saved_row or {}).get("detail") or {}
+    drafts = ss.setdefault("review_draft", {})
+    draft = drafts.setdefault(ws.isoformat(), {})
+    rendered: list[str] = []          # widget keys drawn this run, mirrored into the draft
+
+    has_meds = bool(_week_regimens("medication", ws, we) or by_cat.get("medication"))
+    has_habits = bool(ref_rows("habits"))
+    cats = [c for c in CATEGORY_LABELS
+            if (c != "medication" or has_meds) and (c != "habit" or has_habits)]
+
+    st.markdown(f"<div class='steplabel'>Step {step + 1} of {len(REVIEW_STEPS)} · "
+                f"<b>{REVIEW_STEPS[step]}</b></div>", unsafe_allow_html=True)
+    bar = action_bar()
+
+    # -- 1. the week at a glance ---------------------------------------------
+    if step == 0:
+        summary = week_summary(ws, by_cat, days)
+        with st.container(key="list_review"):
+            for cat in cats:
+                c1, c2 = st.columns([4.4, 1.5], vertical_alignment="center")
+                c1.markdown(f"**{CATEGORY_LABELS[cat]}**  \n" + "  \n".join(
+                    f"<span class='ref'>{line}</span>" for line in summary[cat]),
+                    unsafe_allow_html=True)
+                with c2:
+                    _day_picker("Edit", cat, days, f"rved_{cat}")
+                    if cat in REGIMEN_KINDS and st.button(
+                            "＋ Add", key=f"rvadd_{cat}", width='stretch'):
+                        open_dialog(f"rvadd_{cat}")
+                        st.rerun()
+
+    # -- 2. fill the gaps -----------------------------------------------------
+    gap_days: dict[str, list[date]] = {}
+    for cat in GAP_CATEGORIES:
+        logged = {_edate(e) for e in by_cat.get(cat, [])}
+        gap_days[cat] = [d for d in days if d not in logged]
+
+    def gap_key(cat, d):
+        return f"rv_{ws}_gap_{cat}_{d}"
+
+    def mark_all_none(cat):
+        for d in gap_days[cat]:
+            st.session_state[gap_key(cat, d)] = "none"
+
+    if step == 1:
+        any_gap = False
+        for cat in GAP_CATEGORIES:
+            if not gap_days[cat]:
+                continue
+            any_gap = True
+            c1, c2 = st.columns([3, 2], vertical_alignment="center")
+            c1.markdown(f"**{CATEGORY_LABELS[cat]}** — nothing logged on these days",
+                        unsafe_allow_html=True)
+            c2.button("All none", key=f"rv_allnone_{cat}", width='stretch',
+                      on_click=mark_all_none, args=(cat,))
+            saved_gaps = (saved.get("gaps") or {}).get(cat, {})
+            label_of = {v: k for k, v in GAP_CHOICES.items()}
+            with st.container(key=f"list_gap_{cat}"):
+                for d in gap_days[cat]:
+                    k = gap_key(cat, d)
+                    _rv_init(k, draft, label_of.get(saved_gaps.get(d.isoformat())))
+                    g1, g2, g3 = st.columns([1.6, 3.4, 0.9], vertical_alignment="center")
+                    g1.markdown(f"{d:%a} {d.day}")
+                    g2.pills(f"{cat} {d}", list(GAP_CHOICES), selection_mode="single",
+                             key=k, label_visibility="collapsed")
+                    rendered.append(k)
+                    if g3.button("＋", key=f"rv_gapadd_{cat}_{d}", width='stretch',
+                                 help="Log it now"):
+                        jump(cat, d)
+        if not any_gap:
+            st.caption("No gaps — alcohol and symptoms have something logged every day.")
+
+        for kind in REGIMEN_KINDS:
+            if not _week_regimens(kind, ws, we, daily_only=True):
+                continue
+            k = f"rv_{ws}_usual_{kind}"
+            label_of = {v: x for x, v in USUAL_CHOICES.items()}
+            _rv_init(k, draft, label_of.get((saved.get("usual_check") or {}).get(kind)))
+            st.markdown(f"**{CATEGORY_LABELS[kind]}** — any days you missed your usual?")
+            st.pills(f"usual {kind}", list(USUAL_CHOICES), selection_mode="single", key=k,
+                     label_visibility="collapsed")
+            rendered.append(k)
+            if ss.get(k) == "missed some":
+                _day_picker("Fix a day", kind, days, f"rvfix_{kind}")
+
+    # -- 3. completeness ------------------------------------------------------
+    def comp_key(cat):
+        return f"rv_{ws}_comp_{cat}"
+
+    def hint(cat) -> str:
+        n = len(days)
+        if cat == "food":
+            return f"entries on {len({_edate(e) for e in by_cat.get('food', [])})} of {n} days"
+        if cat in GAP_CATEGORIES:
+            covered = n - len(gap_days[cat]) + sum(
+                1 for d in gap_days[cat]
+                if (ss.get(gap_key(cat, d)) or draft.get(gap_key(cat, d))) == "none")
+            return f"logged or marked none on {covered} of {n} days"
+        if cat in REGIMEN_KINDS:
+            return "your usual list is assumed"
+        plans = habit_plans()
+        if any(h["id"] in plans for h in ref_rows("habits")):
+            return "usual habits are assumed"
+        return f"something logged on {len({_edate(e) for e in by_cat.get('habit', [])})} of {n} days"
+
+    if step == 2:
+        st.caption("Roughly what % of what happened made it into the log? This tells "
+                   "later analyses how far to trust each week.")
+        with st.container(key="list_comp"):
+            for cat in cats:
+                k = comp_key(cat)
+                _rv_init(k, draft, _BAND_SHOWN.get(
+                    ((saved.get("completeness") or {}).get(cat) or {}).get("band")))
+                st.markdown(f"**{CATEGORY_LABELS[cat]}** <span class='ref'>· {hint(cat)}</span>",
                             unsafe_allow_html=True)
+                st.pills(f"completeness {cat}", list(BAND_BY_LABEL), selection_mode="single",
+                         key=k, label_visibility="collapsed")
+                rendered.append(k)
+
+    # -- 4. anything unusual --------------------------------------------------
+    tag_key, other_key = f"rv_{ws}_tags", f"rv_{ws}_other"
+    if step == 3:
+        options = C.REVIEW_TAGS + ["other"]
+        saved_tags = [t for t in (saved.get("tags") or []) if t in options]
+        if saved.get("other_note") and "other" not in saved_tags:
+            saved_tags.append("other")
+        _rv_init(tag_key, draft, saved_tags or None)
+        st.caption("Optional — anything that made this week different.")
+        st.pills("tags", options, selection_mode="multi", key=tag_key,
+                 label_visibility="collapsed")
+        rendered.append(tag_key)
+        if "other" in (ss.get(tag_key) or []):
+            _rv_init(other_key, draft, saved.get("other_note"))
+            st.text_input("What else?", key=other_key, placeholder="a few words")
+            rendered.append(other_key)
+
+    for k in rendered:
+        draft[k] = ss.get(k)
+
+    # -- navigation + save ----------------------------------------------------
+    def val(k):
+        return ss[k] if k in ss and k in rendered else draft.get(k)
 
     with bar:
-        label = "Update day" if existing else "Save day"
-        if st.button(label, type="primary", width='stretch', key="save_btn"):
-            by_name = {h["name"]: h for h in habits}
-            rows = [{
-                "event_date": d, "time_bucket": None, "category": "habit",
-                "item": name, "quantity": val,
-                "unit": by_name[name].get("unit") or ("done" if by_name[name]["kind"] == "binary" else None),
-                "detail": {"kind": by_name[name]["kind"]},
-            } for name, val in values.items()]
-            replace_day("habit", d, rows)
-            flash("Habits saved.")
+        c1, c2 = st.columns(2)
+        if c1.button("◀ Back", key="rv_back", width='stretch', disabled=step == 0):
+            ss.review_step = step - 1
             st.rerun()
+        last = step == len(REVIEW_STEPS) - 1
+        if not last:
+            if c2.button("Next ▶", key="rv_next", type="primary", width='stretch'):
+                ss.review_step = step + 1
+                st.rerun()
+        elif c2.button("Update review" if saved_row else "Save review", key="rv_save",
+                       type="primary", width='stretch'):
+            completeness = {}
+            for cat in cats:
+                lbl = val(comp_key(cat))
+                if lbl in BAND_BY_LABEL:
+                    lo, hi = BAND_BY_LABEL[lbl]
+                    completeness[cat] = {"band": band_label(lo, hi), "low": lo, "high": hi}
+            gaps = {}
+            for cat in GAP_CATEGORIES:
+                answers = {d.isoformat(): GAP_CHOICES[val(gap_key(cat, d))]
+                           for d in gap_days[cat] if val(gap_key(cat, d)) in GAP_CHOICES}
+                if answers:
+                    gaps[cat] = answers
+            usual = {kind: USUAL_CHOICES[val(f"rv_{ws}_usual_{kind}")]
+                     for kind in REGIMEN_KINDS
+                     if val(f"rv_{ws}_usual_{kind}") in USUAL_CHOICES}
+            tags = [t for t in (val(tag_key) or []) if t != "other"]
+            other = (val(other_key) or "").strip() if "other" in (val(tag_key) or []) else ""
+            if saved_row:
+                db.event_delete(saved_row["id"])
+            db.events_insert([{
+                "event_date": ws, "category": C.REVIEW_CATEGORY, "item": "weekly",
+                "detail": {"week_start": ws.isoformat(), "week_end": we.isoformat(),
+                           "completeness": completeness, "gaps": gaps,
+                           "usual_check": usual, "tags": tags,
+                           "other_note": other or None}}])
+            drafts.pop(ws.isoformat(), None)
+            for k in [k for k in ss.keys() if str(k).startswith(f"rv_{ws}_")]:
+                del ss[k]
+            ss.pop("_reviewed", None)
+            ss.review_step = 0
+            flash(f"Week of {week_label(ws)} reviewed.")
+            go(None)
+
+    for kind in REGIMEN_KINDS:
+        if dialog_is(f"rvadd_{kind}"):
+            _REVIEW_ADD[kind](kind, ws)
+    if dialog_is("medsym"):
+        medsym_dialog()
 
 
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
+
+def _added_on(created_at) -> date | None:
+    """The local date a reference row was created, from its created_at stamp."""
+    if not created_at:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (ts.astimezone() if ts.tzinfo else ts).date()
+
 
 def _seed_defaults():
     if not db.ref_list("symptom_types"):
@@ -1276,27 +1981,43 @@ def panel_settings():
 
     # -- habits -------------------------------------------------------------
     with tabs[4]:
+        st.caption("Add new habits on the Habits page. Here you can change whether "
+                   "one is usually done, or remove it.")
+        plans = habit_plans()
         with st.container(key="list_hab"):
             for h in ref_rows("habits"):
-                c1, c2 = st.columns([5, 0.7], vertical_alignment="center")
+                p = plans.get(h["id"])
+                added = _added_on(h.get("created_at"))
                 unit = f" ({h['unit']})" if h.get("unit") else ""
-                c1.write(f"{h['name']} — {h['kind']}{unit}")
-                if c2.button("✕", key=f"dh_{h['id']}", width='stretch'):
+                meta = describe_plan(h, p) if p else (f"added {added:%b} {added.day}"
+                                                      if added else "")
+                c1, c2, c3 = st.columns([4.2, 1.3, 0.7], vertical_alignment="center")
+                c1.markdown(f"**{h['name']}** <span class='unit'>"
+                            f"{HABIT_KIND_LABELS.get(h['kind'], h['kind'])}{unit}</span>"
+                            f"  \n<span class='ref'>{meta}</span>", unsafe_allow_html=True)
+                with c2.popover("Edit", width='stretch'):
+                    usual, plan, start, problem = habit_usual_inputs(
+                        f"eh_{h['id']}", h["kind"], current=p,
+                        start_default=None if p else (added or date.today()))
+                    if p:
+                        st.caption("Changes apply from today. Days already covered "
+                                   "keep what they were.")
+                    if st.button("Save", type="primary", width='stretch',
+                                 key=f"eh_{h['id']}_go"):
+                        if problem:
+                            st.warning(problem)
+                        else:
+                            if usual and not p:
+                                plan = {**plan, "since": (start or date.today()).isoformat()}
+                            set_habit_plan(h, plan if usual else None)
+                            flash(f"{h['name']} updated.")
+                            st.rerun()
+                if c3.button("✕", key=f"dh_{h['id']}", width='stretch'):
                     db.ref_delete("habits", h["id"])
+                    if p:
+                        save_habit_plans({k: v for k, v in plans.items() if k != h["id"]})
                     bust_refs()
                     st.rerun()
-        with st.form("add_habit", clear_on_submit=True):
-            name = st.text_input("Habit")
-            c1, c2 = st.columns(2)
-            kind = c1.selectbox("Type", ["binary", "count"])
-            unit = c2.text_input("Unit", placeholder="min, glasses")
-            if st.form_submit_button("Add habit", width='stretch') and name.strip():
-                db.ref_upsert("habits", {
-                    "name": name.strip(), "kind": kind,
-                    "unit": unit.strip() or None, "active": True,
-                    "sort_order": len(ref_rows("habits"))})
-                bust_refs()
-                st.rerun()
 
     # -- export -------------------------------------------------------------
     with tabs[5]:
@@ -1331,6 +2052,7 @@ ROUTES = {
     "supplement": panel_supplements,
     "medication": panel_medications,
     "habit": panel_habits,
+    "review": panel_review,
     "settings": panel_settings,
 }
 

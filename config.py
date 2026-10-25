@@ -110,3 +110,17 @@ def is_daily(frequency: str) -> bool:
     return f in ("daily", "every day") or f.endswith("/day") or f.endswith("/d")
 
 CATEGORIES = ["food", "alcohol", "symptom", "supplement", "medication", "habit"]
+
+# Not a logging panel: one row per reviewed week (event_date = the Monday).
+REVIEW_CATEGORY = "review"
+
+# ---------------------------------------------------------------------------
+# Weekly review
+# ---------------------------------------------------------------------------
+
+# Weeks run Monday-Sunday. On Sundays the week just ending can be reviewed;
+# from Monday the card offers the week before.
+COMPLETENESS_BANDS = [(0, 20), (20, 40), (40, 60), (60, 80), (80, 100)]
+
+# Optional context for an unusual week; "other" opens a comment box.
+REVIEW_TAGS = ["travel", "sick", "stressful week", "holiday / celebration", "poor sleep"]

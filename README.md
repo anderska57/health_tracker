@@ -96,7 +96,7 @@ Everything lands in one `events` table:
 | `event_time` | real clock time where one is meaningful (food); null elsewhere |
 | `time_bucket` | morning / afternoon / evening / night (null where not meaningful) |
 | `logged_at` | when the row was written — lets you tell live from retrospective logging |
-| `category` | food / alcohol / symptom / supplement / medication / habit |
+| `category` | food / alcohol / symptom / supplement / medication / habit / review |
 | `item` | drink type, food text, symptom name, supplement or medication name, habit name |
 | `quantity`, `unit` | drinks, habit counts |
 | `severity` | symptoms, 1–5 |
@@ -192,8 +192,45 @@ Pick severity and *every* time of day it applied. Each time of day is stored as
 its own row so `time_bucket` stays queryable next to alcohol and food; the rows
 share `detail.entry_id`, which ties them back into one entry.
 
-**Habits.** Binary (checkbox) or count (number box). Saving replaces the day rather
-than appending, so re-saving is safe.
+**Habits.** Yes/no (checkbox) or count (number box), added on the Habits page
+with **＋ New habit**. Each habit is one of two kinds:
+
+- *plain* — nothing is assumed. Tick it, or enter a count, on days you did it.
+  Saving a day writes a row for every plain habit (0 = didn't).
+- *usual* ("I usually do this") — assumed done on its scheduled days (every
+  day, weekdays, or picked days) from the day it was added, like the usual
+  supplement list. Uncheck it on a day you didn't; only days that differ get a
+  row (`detail.usual` holds the assumed value). Count habits have a usual amount.
+
+The schedules live in `app_settings` under the key `habit_usual` (JSON keyed by
+habit id), so this needed no database change. Switching a schedule off or
+changing it in Settings first writes the days it covered as ordinary rows
+(`detail.from_usual`), so past days never change after the fact. Every widget
+key includes the date, so a tick never carries over to another day.
+
+To fill in a yes/no habit you forgot to log, `backfill_habit.py` previews and
+then writes a run of days (see the top of that file).
+
+## Weekly review
+
+A card on the home screen offers the week (Monday–Sunday; on a Sunday, the week
+ending that day) until it's reviewed; **📋 Weekly review** at the bottom of the
+home screen reaches any earlier week. Four short steps:
+
+1. **Your week** — a one-line summary per category, with **Edit** (open that
+   panel on a chosen day; the back arrow returns to the review) and, for
+   supplements and medications, **＋ Add**.
+2. **Fill the gaps** — days with no alcohol or symptoms logged: *none* (it
+   didn't happen) or *not sure*, plus "any days you missed your usual?" for
+   supplements and medications.
+3. **How complete?** — for each category, roughly what % of what happened made
+   it into the log, in 20% ranges.
+4. **Anything unusual?** — optional tags, and *other* with a comment.
+
+The review is one `events` row: `category = 'review'`, `event_date` = the
+Monday, answers in `detail` (`completeness` with `low`/`high` per category,
+`gaps`, `usual_check`, `tags`, `other_note`). Answers survive jumping out to
+fix a day.
 
 ## Known beta limitations
 

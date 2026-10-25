@@ -333,7 +333,123 @@ sv = at.button(key="save_btn")
 check("save-day button present above the list", str(sv.label) == "Save day")
 sv.click().run()
 check("habits save succeeds", not at.exception, at)
-check("button then reads Update day", str(at.button(key="save_btn").label) == "Update day")
+check("with nothing changed since, it reads No changes",
+      str(at.button(key="save_btn").label) == "No changes" and at.button(key="save_btn").disabled)
+
+print("\nhabits: add on the page, usual habits, day switching")
+import json  # noqa: E402
+from datetime import date as _date, timedelta as _td  # noqa: E402
+_today = _date.today()
+at = fresh()
+open_panel(at, "habit")
+at.button(key="add_btn").click().run()
+check("New habit opens a dialog", at.text_input(key="nh_name") is not None, at)
+at.text_input(key="nh_name").set_value("stretch")
+at.button(key="nh_go").click().run()
+check("a plain habit added on the page appears unchecked",
+      any(c.label == "stretch" and not c.value for c in at.checkbox), at)
+at.button(key="add_btn").click().run()
+at.text_input(key="nh_name").set_value("floss")
+at.checkbox(key="nh_usual").check().run()
+check("'I usually do this' asks how often",
+      any(b.key == "nh_freq" for b in at.get("button_group")), at)
+at.button(key="nh_go").click().run()
+check("a usual habit starts checked", any(c.label == "floss" and c.value for c in at.checkbox), at)
+_plans = json.loads(SQLiteDB(os.environ["TRACKER_DB"]).setting_get("habit_usual"))
+check("its schedule is stored from the day you're on",
+      any(p["since"] == _today.isoformat() and p["days"] == list(range(7))
+          for p in _plans.values()))
+at.button(key="add_btn").click().run()
+at.text_input(key="nh_name").set_value("Floss")
+at.button(key="nh_go").click().run()
+check("a duplicate name is refused", any("already on your list" in str(w.value)
+                                         for w in at.warning), at)
+at = fresh()
+open_panel(at, "habit")
+[c for c in at.checkbox if c.label == "floss"][0].uncheck().run()
+at.button(key="save_btn").click().run()
+_hab = [e for e in SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="habit")
+        if e["item"] == "floss"]
+check("unchecking a usual habit stores one 'didn't' row",
+      len(_hab) == 1 and _hab[0]["quantity"] == 0 and _hab[0]["detail"].get("usual") == 1)
+[c for c in at.checkbox if c.label == "stretch"][0].check().run()
+at.button(key="prev_day").click().run()
+check("a tick doesn't carry over to another day",
+      not any(c.label == "stretch" and c.value for c in at.checkbox), at)
+
+# Settings: switching a usual habit off writes out the days it covered.
+_db = SQLiteDB(os.environ["TRACKER_DB"])
+_fid = next(h["id"] for h in _db.ref_list("habits") if h["name"] == "floss")
+_p = json.loads(_db.setting_get("habit_usual"))
+_p[_fid]["since"] = (_today - _td(days=3)).isoformat()
+_db.setting_set("habit_usual", json.dumps(_p))
+at = fresh()
+at.button(key="settings").click().run()
+check("settings shows the habit's schedule",
+      any("usually done every day" in str(m.value) for m in at.markdown), at)
+at.checkbox(key=f"eh_{_fid}_usual").uncheck().run()
+at.button(key=f"eh_{_fid}_go").click().run()
+_frozen = sorted(e["event_date"] for e in SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(
+    category="habit") if e["item"] == "floss" and e["detail"].get("from_usual"))
+check("switching it off keeps the days it covered as done",
+      _frozen == [(_today - _td(days=i)).isoformat() for i in (3, 2, 1)], at)
+check("and the schedule is gone",
+      _fid not in json.loads(SQLiteDB(os.environ["TRACKER_DB"]).setting_get("habit_usual")))
+
+print("\nweekly review")
+at = fresh()
+card = [b for b in at.button if b.key == "review_card"]
+check("home offers the weekly review", len(card) == 1)
+card[0].click().run()
+check("review opens on step 1", not at.exception and
+      any("Step 1 of 4" in str(m.value) for m in at.markdown), at)
+check("step 1 summarises each category",
+      all(any(f"**{c}**" in str(m.value) for m in at.markdown)
+          for c in ("Food & drink", "Alcohol", "Symptoms", "Supplements", "Habits")))
+check("step 1 lets you add a supplement", at.button(key="rvadd_supplement") is not None)
+at.button(key="rvadd_supplement").click().run()
+at.text_input(key="add_supplement_name").set_value("Zinc")
+at.button(key="add_supplement_go").click().run()
+check("adding from the review logs it and stays on the review",
+      at.session_state["panel"] == "review" and any(
+          e["item"] == "Zinc" for e in SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(
+              category="supplement")), at)
+at.button(key="rv_next").click().run()
+_ws = at.session_state["review_week"]
+gap = [p for p in at.pills if "_gap_alcohol_" in str(p.key)]
+check("step 2 lists days with no alcohol logged", len(gap) >= 1, at)
+at.button(key="rv_allnone_alcohol").click().run()
+check("All none marks every gap day",
+      all(p.value == "none" for p in at.pills if "_gap_alcohol_" in str(p.key)), at)
+at.button(key="rv_back").click().run()
+_eds = [b for b in at.button if str(b.key).startswith("rved_food_")]
+_eds[0].click().run()
+check("Edit opens that panel on that day", at.session_state["panel"] == "food", at)
+at.button(key="back").click().run()
+check("back returns to the review", at.session_state["panel"] == "review", at)
+at.button(key="rv_next").click().run()
+check("answers survive the detour",
+      all(p.value == "none" for p in at.pills if "_gap_alcohol_" in str(p.key)), at)
+at.button(key="rv_next").click().run()
+at.pills(key=f"rv_{_ws}_comp_alcohol").set_value("80–100").run()
+check("step 3 rates completeness per category with % ranges",
+      not at.exception and len([p for p in at.pills if "_comp_" in str(p.key)]) >= 5, at)
+at.button(key="rv_next").click().run()
+at.pills(key=f"rv_{_ws}_tags").set_value(["travel", "other"]).run()
+check("'other' opens a comment box", at.text_input(key=f"rv_{_ws}_other") is not None, at)
+at.text_input(key=f"rv_{_ws}_other").set_value("new job").run()
+at.button(key="rv_save").click().run()
+_rv = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="review")
+_det = _rv[0]["detail"] if _rv else {}
+check("the review is saved as one row for the week",
+      len(_rv) == 1 and _rv[0]["event_date"] == _ws.isoformat())
+check("it keeps completeness, gaps, tags and the comment",
+      _det.get("completeness", {}).get("alcohol", {}).get("low") == 80
+      and set(_det.get("gaps", {}).get("alcohol", {}).values()) == {"none"}
+      and _det.get("tags") == ["travel"] and _det.get("other_note") == "new job")
+check("the home card is replaced by a small link",
+      not [b for b in at.button if b.key == "review_card"]
+      and [b for b in at.button if b.key == "review_link"], at)
 
 print("\ndate navigation + export")
 at = fresh()
