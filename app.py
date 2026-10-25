@@ -19,8 +19,16 @@ from datetime import date, datetime, time as dtime, timedelta
 import pandas as pd
 import streamlit as st
 
+import importlib
+
 import config as C
 from db import _secret, get_db
+
+# Streamlit Cloud pulls new code into a running app without restarting Python,
+# and Python keeps the first copy of an imported module. Reloading config here
+# means a push that adds a new setting can't leave app.py looking for a name
+# the old copy doesn't have (an AttributeError until the app was rebooted).
+C = importlib.reload(C)
 
 st.set_page_config(page_title=C.APP_TITLE, page_icon="✚",
                    layout="centered", initial_sidebar_state="collapsed")
