@@ -15,6 +15,7 @@ import hmac
 import json
 import uuid
 from datetime import date, datetime, time as dtime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import streamlit as st
@@ -87,6 +88,10 @@ st.markdown("""
   .st-key-tile_supplement button {border-top-color: #8CBF7A;}
   .st-key-tile_medication button {border-top-color: #7FA7D9;}
   .st-key-tile_habit button {border-top-color: #B39DDB;}
+  .st-key-tile_activity button {border-top-color: #5DA9C9;}
+  /* activity buttons: let a long name ("strength training") wrap, not cut off */
+  [class*="st-key-act_"] button p {white-space: normal !important; line-height: 1.15;
+      font-size: 0.9rem !important;}
 
   /* list rows: one line per item */
   [class*="st-key-list"] [data-testid="stVerticalBlock"] {gap: 0.1rem;}
@@ -247,6 +252,30 @@ require_passcode()
 # State + helpers
 # ---------------------------------------------------------------------------
 
+# The server runs on UTC, so "today" and "now" have to come from the phone's
+# own time zone -- otherwise the date flips to tomorrow in the evening (7pm on
+# US Eastern winter time) and the default time of day is hours off. The
+# browser reports its zone; APP_TIMEZONE in secrets is the fallback.
+
+def local_tz() -> ZoneInfo | None:
+    for name in (getattr(st.context, "timezone", None), _secret("APP_TIMEZONE")):
+        if isinstance(name, str) and name:
+            try:
+                return ZoneInfo(name)
+            except (ZoneInfoNotFoundError, ValueError):
+                continue
+    return None            # no zone known: use the server's clock
+
+
+def local_now() -> datetime:
+    """The current wall-clock time where the user is (naive, like the rest of the app)."""
+    return datetime.now(local_tz()).replace(tzinfo=None)
+
+
+def local_today() -> date:
+    return local_now().date()
+
+
 @st.cache_resource
 def _db():
     return get_db()
@@ -254,7 +283,7 @@ def _db():
 
 db = _db()
 
-# (route, emoji, tile label). Three across, two rows.
+# (route, emoji, tile label). Three across.
 PANELS = [
     ("food", "🍽️", "Food & drink"),
     ("alcohol", "🍷", "Alcohol"),
@@ -262,6 +291,7 @@ PANELS = [
     ("supplement", "🌿", "Supplements"),
     ("medication", "💊", "Medications"),
     ("habit", "✅", "Habits"),
+    ("activity", "🏃", "Activity"),
 ]
 
 # Supplements and medications are the same machinery: a usual list that is
@@ -272,8 +302,9 @@ REGIMEN_KINDS = {
 }
 
 st.session_state.setdefault("panel", None)
-st.session_state.setdefault("log_date", date.today())
+st.session_state.setdefault("log_date", local_today())
 st.session_state.setdefault("alc_lines", [])
+st.session_state.setdefault("act_lines", [])
 st.session_state.setdefault("sym_lines", [])
 st.session_state.setdefault("medsym_lines", [])
 st.session_state.setdefault("flash", None)
@@ -285,6 +316,7 @@ def go(panel: str | None):
         st.session_state.pop("_back_to", None)
     st.session_state.pop("_dialog", None)
     st.session_state.alc_lines = []
+    st.session_state.act_lines = []
     st.session_state.sym_lines = []
     st.session_state.medsym_lines = []
     st.session_state.sym_rev = st.session_state.get("sym_rev", 0) + 1
@@ -342,6 +374,17 @@ def logged_header(title: str = "Logged this day", key: str = "loghead"):
         c2.markdown("<div class='delhead'>delete entry</div>", unsafe_allow_html=True)
 
 
+def checkbox_with_info(label: str, *, value: bool, key: str, info: str) -> bool:
+    """A checkbox with an ⓘ beside it that opens a short explanation.
+    (Streamlit's help= tooltip only works on hover; on a phone, tapping its ?
+    just toggled the box.)"""
+    c1, c2 = st.columns([5, 1], vertical_alignment="center")
+    checked = c1.checkbox(label, value=value, key=key)
+    with c2.popover("ⓘ", width='stretch'):
+        st.markdown(info)
+    return checked
+
+
 def section(label: str):
     st.markdown(f"<div class='sect'>{label}</div>", unsafe_allow_html=True)
 
@@ -350,7 +393,7 @@ def slot_default_time(slot: str) -> dtime:
     """Prefilled time for an eating occasion. Snacks mean 'now'; the three
     meals use the times set in Settings, falling back to the defaults."""
     if slot == "snack":
-        n = datetime.now()
+        n = local_now()
         return dtime(n.hour, n.minute)
     raw = db.setting_get(C.MEAL_TIME_SETTING.format(slot=slot),
                          C.DEFAULT_MEAL_TIMES[slot])
@@ -399,11 +442,11 @@ def replace_day(category: str, d: date, rows: list[dict]):
 
 def day_label(d: date) -> str:
     stamp = f"{d:%a}, {d:%b} {d.day}"
-    if d == date.today():
+    if d == local_today():
         return f"Today · {stamp}"
-    if d == date.today() - timedelta(days=1):
+    if d == local_today() - timedelta(days=1):
         return f"Yesterday · {stamp}"
-    return stamp + ("" if d.year == date.today().year else f", {d.year}")
+    return stamp + ("" if d.year == local_today().year else f", {d.year}")
 
 
 def topbar(title: str):
@@ -427,13 +470,13 @@ def header(title: str) -> date:
             st.session_state.log_date = d - timedelta(days=1)
             st.rerun()
         with c2.popover(day_label(d), width='stretch'):
-            picked = st.date_input("Jump to a date", value=d, max_value=date.today(),
+            picked = st.date_input("Jump to a date", value=d, max_value=local_today(),
                                    format="MM/DD/YYYY", key=f"jump_{d}")
             if picked != d:
                 st.session_state.log_date = picked
                 st.rerun()
         nxt = d + timedelta(days=1)
-        if c3.button("▶", key="next_day", width='stretch', disabled=nxt > date.today(),
+        if c3.button("▶", key="next_day", width='stretch', disabled=nxt > local_today(),
                      help="Next day"):
             st.session_state.log_date = nxt
             st.rerun()
@@ -463,12 +506,15 @@ def _tile_status(cat: str, rows: list[dict]) -> str:
     if cat in ("supplement", "medication"):
         return "edited" if rows else "as usual"
     if cat == "habit" and ref_rows("habits"):
-        return f"{habits_done(date.today(), rows)} done"
+        return f"{habits_done(local_today(), rows)} done"
     if not rows:
         return "—"
     if cat == "alcohol":
         n = sum(int(r.get("quantity") or 0) for r in rows)
         return f"{n} drink{'s' if n != 1 else ''}"
+    if cat == "activity":
+        mins = sum(float(r.get("quantity") or 0) for r in rows)
+        return f"{mins:g} min" if mins else f"{len(rows)} logged"
     if cat == "symptom":
         n = len({(r.get("detail") or {}).get("entry_id") or r["id"] for r in rows})
         return f"{n} logged"
@@ -482,7 +528,7 @@ def open_review(ws: date):
 
 
 def home():
-    today = date.today()
+    today = local_today()
     with st.container(horizontal=True, vertical_alignment="center", key="homebar"):
         st.markdown(f"<div class='ptitle'>{today:%A}, {today:%b} {today.day}</div>",
                     unsafe_allow_html=True)
@@ -503,7 +549,7 @@ def home():
                 with col.container(key=f"tile_{cat}"):
                     if st.button(f"{icon}  \n**{label}**  \n:gray[{status}]", key=f"panel_{cat}",
                                  width='stretch'):
-                        st.session_state.log_date = date.today()
+                        st.session_state.log_date = local_today()
                         go(cat)
 
     target = review_target(today)
@@ -538,7 +584,7 @@ def panel_alcohol():
                           type="primary" if t in chosen else "secondary"):
                 st.session_state.alc_lines.append(
                     {"uid": str(uuid.uuid4())[:8], "type": t,
-                     "qty": 1, "bucket": C.current_bucket()})
+                     "qty": 1, "bucket": C.current_bucket(local_now())})
                 st.rerun()
 
     lines = st.session_state.alc_lines
@@ -589,6 +635,130 @@ def panel_alcohol():
         " · ".join(f"{k} {v}" for k, v in C.STANDARD_DRINK_REFERENCE.items()) +
         "<br>Log a bigger pour as more drinks — a 10 oz glass of wine is 2.</div>",
         unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Physical activity
+# ---------------------------------------------------------------------------
+# Tap an activity from your usual list (or + Other); each tap adds a line with
+# minutes (optional) and time of day, like the drink lines on Alcohol. One row
+# per line: item = activity, quantity = minutes, unit = "min".
+
+def _slug(name: str) -> str:
+    """A widget-key-safe version of a name (keys become CSS class names)."""
+    return "".join(ch if ch.isalnum() else "_" for ch in name.lower())
+
+
+def activity_types() -> list[str]:
+    ss = st.session_state
+    if "_activity_types" not in ss:
+        raw = db.setting_get(C.ACTIVITY_LIST_SETTING)
+        try:
+            names = json.loads(raw) if raw else None
+        except (TypeError, ValueError):
+            names = None
+        ss._activity_types = names if isinstance(names, list) else list(C.DEFAULT_ACTIVITIES)
+    return ss._activity_types
+
+
+def save_activity_types(names: list[str]):
+    db.setting_set(C.ACTIVITY_LIST_SETTING, json.dumps(names))
+    st.session_state._activity_types = names
+
+
+def _act_new_line(name: str) -> dict:
+    return {"uid": str(uuid.uuid4())[:8], "type": name, "minutes": None,
+            "bucket": C.current_bucket(local_now())}
+
+
+@st.dialog("Other activity", on_dismiss=close_dialog)
+def other_activity_dialog():
+    name = st.text_input("Activity", placeholder="e.g. tennis", key="oa_name")
+    keep = st.checkbox("Add it to my list for next time", value=True, key="oa_keep")
+    # Never disabled: on a phone the typed name only reaches the app when the
+    # box loses focus, so a button waiting for it would swallow the first tap.
+    if st.button("Add", type="primary", width='stretch', key="oa_go"):
+        name = (name or "").strip()
+        if not name:
+            st.warning("Give the activity a name.")
+            return
+        known = {a.lower(): a for a in activity_types()}
+        name = known.get(name.lower(), name)
+        if keep and name.lower() not in known:
+            save_activity_types(activity_types() + [name])
+        st.session_state.act_lines.append(_act_new_line(name))
+        close_dialog()
+        st.rerun()
+
+
+def panel_activity():
+    d = header("Activity")
+    ss = st.session_state
+    lines = ss.act_lines
+
+    if dialog_is("other_activity"):
+        other_activity_dialog()
+
+    names = activity_types()
+    chosen = {l["type"] for l in lines}
+    for i in range(0, len(names), 3):
+        cols = st.columns(3)
+        for col, t in zip(cols, names[i:i + 3]):
+            if col.button(t, key=f"act_{_slug(t)}", width='stretch',
+                          type="primary" if t in chosen else "secondary"):
+                lines.append(_act_new_line(t))
+                st.rerun()
+
+    bar = action_bar()
+    if lines:
+        with st.container(key="list"):
+            for line in list(lines):
+                c1, c2, c3, c4 = st.columns([1.9, 1.2, 2.0, 0.7], vertical_alignment="center")
+                c1.markdown(f"**{line['type']}**")
+                line["minutes"] = c2.number_input(
+                    "minutes", min_value=0, max_value=600, step=5, value=line["minutes"],
+                    placeholder="min", key=f"am_{line['uid']}", label_visibility="collapsed")
+                line["bucket"] = c3.selectbox(
+                    "time of day", C.TIME_BUCKETS, key=f"ab_{line['uid']}",
+                    index=C.TIME_BUCKETS.index(line["bucket"]),
+                    label_visibility="collapsed")
+                if c4.button("✕", key=f"ax_{line['uid']}", width='stretch'):
+                    lines.remove(line)
+                    st.rerun()
+    else:
+        st.caption("Tap what you did, then add minutes if you like. Tap it again "
+                   "for a second session.")
+
+    with bar:
+        c1, c2 = st.columns(2)
+        n = len(lines)
+        save = c1.button(f"Save {n} activit{'ies' if n != 1 else 'y'}" if n else "Save",
+                         type="primary", width='stretch', key="save_btn", disabled=not n)
+        if c2.button("＋ Other", width='stretch', key="add_btn"):
+            open_dialog("other_activity")
+            st.rerun()
+    if save:
+        db.events_insert([
+            {"event_date": d, "time_bucket": l["bucket"], "category": "activity",
+             "item": l["type"], "quantity": l["minutes"],
+             "unit": "min" if l["minutes"] is not None else None}
+            for l in lines])
+        ss.act_lines = []
+        flash(f"Logged {n} activit{'ies' if n != 1 else 'y'}.")
+        st.rerun()
+
+    existing = day_events(d, "activity")
+    if existing:
+        logged_header()
+        with st.container(key="list_logged"):
+            for e in existing:
+                c1, c2 = st.columns([5, 0.7], vertical_alignment="center")
+                mins = f" · {fmt_qty(e['quantity'])} min" if e.get("quantity") is not None else ""
+                when = f" · {e['time_bucket']}" if e.get("time_bucket") else ""
+                c1.write(f"{e['item']}{mins}{when}")
+                if c2.button("✕", key=f"del_{e['id']}", width='stretch'):
+                    db.event_delete(e["id"])
+                    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +825,7 @@ SYM_PICK_SCROLL_AFTER = 12     # symptoms; beyond this the picker scrolls
 
 def _sym_new_line(name: str) -> dict:
     return {"uid": str(uuid.uuid4())[:8], "name": name, "severity": 3,
-            "buckets": [C.current_bucket()], "note": ""}
+            "buckets": [C.current_bucket(local_now())], "note": ""}
 
 
 def symptom_names() -> list[str]:
@@ -850,7 +1020,7 @@ def medsym_dialog():
     ss = st.session_state
     ctx = ss.get("_medsym") or {}
     meds = ctx.get("meds") or []
-    d = date.fromisoformat(ctx.get("date", date.today().isoformat()))
+    d = date.fromisoformat(ctx.get("date", local_today().isoformat()))
     st.markdown(f"You took **{', '.join(meds)}** for a symptom. Which one?")
     symptom_picker("medsym_lines", "medsym")
     c1, c2 = st.columns([3, 1.3], vertical_alignment="bottom")
@@ -925,8 +1095,11 @@ def _add_dialog_body(kind: str, d: date, regimens: list[dict], usual_default: bo
     dose = c1.number_input("Dose", min_value=0.0, step=0.5, value=1.0, format="%g",
                            key=f"{p}_dose")
     unit = c2.text_input("Unit", placeholder="capsule, mg", key=f"{p}_unit")
-    usual = st.checkbox("Part of my usual routine", value=usual_default, key=f"{p}_usual",
-                        help="Usual items are assumed taken every day they're due.")
+    usual = checkbox_with_info(
+        "Part of my usual routine", value=usual_default, key=f"{p}_usual",
+        info=f"**Usual {noun}s** are assumed taken on every day they're due, so you "
+             f"don't log them day to day. Uncheck one on the {noun} page on a day "
+             f"you skipped it.\n\nLeave this off for something you took just this once.")
     freq = st.selectbox("How often", C.SUPPLEMENT_FREQUENCIES, key=f"{p}_freq") if usual else ""
     c1, c2 = st.columns(2)
     brand = c1.text_input("Brand (optional)", key=f"{p}_brand") if pick == _NEW else ""
@@ -1217,9 +1390,9 @@ def set_habit_plan(h: dict, new: dict | None):
             and old.get("amount") == new.get("amount"):
         return                                    # nothing changed
     if old:
-        freeze_habit(h, old, date.today())
+        freeze_habit(h, old, local_today())
         if new:
-            new = {**new, "since": date.today().isoformat()}
+            new = {**new, "since": local_today().isoformat()}
     if new:
         plans[h["id"]] = new
     else:
@@ -1231,9 +1404,11 @@ def habit_usual_inputs(prefix: str, kind: str, *, current: dict | None = None,
                        start_default: date | None = None):
     """'I usually do this' + how often (+ usual amount for counts). Returns
     (usual?, plan-without-since, start date or None, problem or None)."""
-    usual = st.checkbox("I usually do this", value=bool(current), key=f"{prefix}_usual",
-                        help="It's checked automatically on the days you pick. "
-                             "Uncheck it on days you didn't.")
+    usual = checkbox_with_info(
+        "I usually do this", value=bool(current), key=f"{prefix}_usual",
+        info="**Usual habits** are checked automatically on the days you pick, so "
+             "you only open the page on a day you *didn't* do it, and uncheck it.\n\n"
+             "Leave this off to tick the habit yourself on days you do it.")
     if not usual:
         return False, None, None, None
     days0 = (current or {}).get("days", HABIT_FREQS["every day"])
@@ -1253,7 +1428,7 @@ def habit_usual_inputs(prefix: str, kind: str, *, current: dict | None = None,
                                  key=f"{prefix}_amount")
     start = None
     if start_default is not None:
-        start = st.date_input("Starting", value=start_default, max_value=date.today(),
+        start = st.date_input("Starting", value=start_default, max_value=local_today(),
                               format="MM/DD/YYYY", key=f"{prefix}_start")
     problem = None if days else "Pick at least one day."
     return True, {"days": sorted(days), **({"amount": amount} if amount is not None else {})}, \
@@ -1417,8 +1592,8 @@ def panel_habits():
 REVIEW_STEPS = ["Your week", "Fill the gaps", "How complete?", "Anything unusual?"]
 CATEGORY_LABELS = {"food": "Food & drink", "alcohol": "Alcohol", "symptom": "Symptoms",
                    "supplement": "Supplements", "medication": "Medications",
-                   "habit": "Habits"}
-GAP_CATEGORIES = ("alcohol", "symptom")
+                   "habit": "Habits", "activity": "Activity"}
+GAP_CATEGORIES = ("alcohol", "symptom", "activity")
 GAP_CHOICES = {"none": "none", "not sure": "unsure"}
 USUAL_CHOICES = {"all taken as listed": "all", "missed some": "missed"}
 
@@ -1439,7 +1614,7 @@ def week_start(d: date) -> date:
 def review_target(today: date | None = None) -> date:
     """The week the review card offers: the one ending today on a Sunday,
     otherwise last week."""
-    today = today or date.today()
+    today = today or local_today()
     ws = week_start(today)
     return ws if today.weekday() == 6 else ws - timedelta(days=7)
 
@@ -1569,6 +1744,20 @@ def week_summary(ws: date, by_cat: dict[str, list[dict]], days: list[date]) -> d
     out["supplement"] = _regimen_summary("supplement", by_cat.get("supplement", []), ws, we)
     out["medication"] = _regimen_summary("medication", by_cat.get("medication", []), ws, we)
     out["habit"] = _habit_summary(by_cat.get("habit", []), days)
+
+    act = by_cat.get("activity", [])
+    if act:
+        mins = sum(float(e.get("quantity") or 0) for e in act)
+        kinds: dict[str, int] = {}
+        for e in act:
+            kinds[e["item"]] = kinds.get(e["item"], 0) + 1
+        what = ", ".join(f"{k} ×{n}" if n > 1 else k for k, n in sorted(kinds.items()))
+        ad = {_edate(e) for e in act}
+        out["activity"] = [f"{len(act)} session{'s' if len(act) != 1 else ''} on {len(ad)} "
+                           f"day{'s' if len(ad) != 1 else ''}"
+                           + (f" · {mins:g} min" if mins else "") + f" · {what}"]
+    else:
+        out["activity"] = ["nothing logged"]
     return out
 
 
@@ -1587,7 +1776,7 @@ def _rv_init(key: str, draft: dict, saved, default=None):
 
 
 def _review_add_body(kind: str, ws: date):
-    days = [ws + timedelta(days=i) for i in range(7) if ws + timedelta(days=i) <= date.today()]
+    days = [ws + timedelta(days=i) for i in range(7) if ws + timedelta(days=i) <= local_today()]
     labels = {f"{d:%a} {d:%b} {d.day}": d for d in days}
     pick = st.pills("Which day?", list(labels), selection_mode="single",
                     default=list(labels)[0], key=f"rva_{kind}_{ws}_day")
@@ -1629,7 +1818,7 @@ def panel_review():
             st.rerun()
     show_flash()
 
-    days = [ws + timedelta(days=i) for i in range(7) if ws + timedelta(days=i) <= date.today()]
+    days = [ws + timedelta(days=i) for i in range(7) if ws + timedelta(days=i) <= local_today()]
     evs = db.events_fetch(start=ws, end=we, limit=5000)
     by_cat: dict[str, list[dict]] = {}
     for e in evs:
@@ -1705,7 +1894,7 @@ def panel_review():
                                  help="Log it now"):
                         jump(cat, d)
         if not any_gap:
-            st.caption("No gaps — alcohol and symptoms have something logged every day.")
+            st.caption("No gaps — alcohol, symptoms and activity have something logged every day.")
 
         for kind in REGIMEN_KINDS:
             if not _week_regimens(kind, ws, we, daily_only=True):
@@ -1842,7 +2031,7 @@ def _added_on(created_at) -> date | None:
         ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
     except ValueError:
         return None
-    return (ts.astimezone() if ts.tzinfo else ts).date()
+    return (ts.astimezone(local_tz()) if ts.tzinfo else ts).date()
 
 
 def _seed_defaults():
@@ -1883,7 +2072,7 @@ def _settings_regimens(kind: str):
                                                      width='stretch'):
                 db.ref_upsert("supplement_regimens",
                               {**r, "status": "stopped",
-                               "end_date": date.today().isoformat()})
+                               "end_date": local_today().isoformat()})
                 bust_refs()
                 st.rerun()
             if c3.button("✕", key=f"dr_{r['id']}", width='stretch'):
@@ -1904,7 +2093,7 @@ def _settings_regimens(kind: str):
             unit = c2.text_input("Unit", placeholder="capsule, mg")
             freq = c3.selectbox("Frequency", C.SUPPLEMENT_FREQUENCIES)
             c1, c2 = st.columns(2)
-            start = c1.date_input("Start date", value=date.today())
+            start = c1.date_input("Start date", value=local_today())
             status = c2.selectbox("Status", C.REGIMEN_STATUSES)
             reason = st.text_input("What for")
             notes = st.text_input("Notes")
@@ -1946,7 +2135,7 @@ def panel_settings():
     show_flash()
 
     tabs = st.tabs(["Supplements", "Medications", "Meal times", "Symptoms",
-                    "Habits", "Export"])
+                    "Habits", "Activities", "Export"])
 
     with tabs[0]:
         _settings_regimens("supplement")
@@ -2006,7 +2195,7 @@ def panel_settings():
                 with c2.popover("Edit", width='stretch'):
                     usual, plan, start, problem = habit_usual_inputs(
                         f"eh_{h['id']}", h["kind"], current=p,
-                        start_default=None if p else (added or date.today()))
+                        start_default=None if p else (added or local_today()))
                     if p:
                         st.caption("Changes apply from today. Days already covered "
                                    "keep what they were.")
@@ -2016,7 +2205,7 @@ def panel_settings():
                             st.warning(problem)
                         else:
                             if usual and not p:
-                                plan = {**plan, "since": (start or date.today()).isoformat()}
+                                plan = {**plan, "since": (start or local_today()).isoformat()}
                             set_habit_plan(h, plan if usual else None)
                             flash(f"{h['name']} updated.")
                             st.rerun()
@@ -2027,8 +2216,20 @@ def panel_settings():
                     bust_refs()
                     st.rerun()
 
-    # -- export -------------------------------------------------------------
+    # -- activities ---------------------------------------------------------
     with tabs[5]:
+        st.caption("Your usual activities, shown on the Activity page. Add new ones "
+                   "there with ＋ Other. Removing one here keeps what you've logged.")
+        with st.container(key="list_act"):
+            for a in activity_types():
+                c1, c2 = st.columns([5, 0.7], vertical_alignment="center")
+                c1.write(a)
+                if c2.button("✕", key=f"da_{_slug(a)}", width='stretch'):
+                    save_activity_types([x for x in activity_types() if x != a])
+                    st.rerun()
+
+    # -- export -------------------------------------------------------------
+    with tabs[6]:
         rows = db.events_fetch(limit=100000)
         st.write(f"{len(rows)} events logged.")
         if rows:
@@ -2038,7 +2239,7 @@ def panel_settings():
                     lambda v: "" if not v else ";".join(f"{k}={x}" for k, x in v.items()))
             st.download_button("Download all events (CSV)",
                                df.to_csv(index=False).encode(),
-                               file_name=f"tracker_events_{date.today()}.csv",
+                               file_name=f"tracker_events_{local_today()}.csv",
                                mime="text/csv", width='stretch')
             st.dataframe(df.head(40), width='stretch', hide_index=True)
         st.divider()
@@ -2060,6 +2261,7 @@ ROUTES = {
     "supplement": panel_supplements,
     "medication": panel_medications,
     "habit": panel_habits,
+    "activity": panel_activity,
     "review": panel_review,
     "settings": panel_settings,
 }

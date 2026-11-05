@@ -451,6 +451,59 @@ check("the home card is replaced by a small link",
       not [b for b in at.button if b.key == "review_card"]
       and [b for b in at.button if b.key == "review_link"], at)
 
+print("\nphysical activity")
+at = fresh()
+check("home has an Activity tile", at.button(key="panel_activity") is not None)
+open_panel(at, "activity")
+check("activity renders", not at.exception, at)
+check("the usual list is offered as buttons",
+      all(at.button(key="act_" + "".join(ch if ch.isalnum() else "_" for ch in a.lower()))
+          for a in C.DEFAULT_ACTIVITIES), at)
+at.button(key="act_walking").click().run()
+at.number_input(key=[n.key for n in at.number_input if str(n.key).startswith("am_")][0]) \
+    .set_value(30).run()
+check("tapping one adds a line with minutes", not at.exception
+      and str(at.button(key="save_btn").label) == "Save 1 activity", at)
+at.button(key="save_btn").click().run()
+_act = SQLiteDB(os.environ["TRACKER_DB"]).events_fetch(category="activity")
+check("it saves minutes and a time of day",
+      len(_act) == 1 and _act[0]["item"] == "walking" and _act[0]["quantity"] == 30
+      and _act[0]["unit"] == "min" and _act[0]["time_bucket"] in C.TIME_BUCKETS)
+at.button(key="add_btn").click().run()
+at.text_input(key="oa_name").set_value("tennis")
+at.button(key="oa_go").click().run()
+check("+ Other adds a line for a new activity",
+      any(m.value == "**tennis**" for m in at.markdown), at)
+check("and keeps it on the list for next time",
+      "tennis" in json.loads(SQLiteDB(os.environ["TRACKER_DB"]).setting_get(
+          C.ACTIVITY_LIST_SETTING)))
+at.button(key="back").click().run()
+check("the tile shows today's minutes", "30 min" in str(at.button(key="panel_activity").label))
+at.button(key="settings").click().run()
+at.button(key="da_tennis").click().run()
+check("an activity can be taken off the list in Settings",
+      "tennis" not in json.loads(SQLiteDB(os.environ["TRACKER_DB"]).setting_get(
+          C.ACTIVITY_LIST_SETTING)), at)
+
+print("\ninfo popups and time zone")
+at = fresh()
+open_panel(at, "supplement")
+at.button(key="add_btn").click().run()
+_pops = [p for p in at.get("popover") if p.proto.popover.label == "ⓘ"]
+check("'usual routine' has an ⓘ that opens an explanation", len(_pops) == 1, at)
+check("the checkbox itself has no hover-only tooltip",
+      not at.checkbox(key="add_supplement_usual").help)
+
+from zoneinfo import ZoneInfo  # noqa: E402
+from datetime import datetime as _dtm  # noqa: E402
+for _zone in ("Pacific/Kiritimati", "Pacific/Pago_Pago"):   # UTC+14 and UTC-11
+    os.environ["APP_TIMEZONE"] = _zone
+    _d = _dtm.now(ZoneInfo(_zone)).date()
+    at = fresh()
+    check(f"'today' follows the time zone ({_zone})",
+          any(f"{_d:%A}, {_d:%b} {_d.day}" in str(m.value) for m in at.markdown), at)
+del os.environ["APP_TIMEZONE"]
+
 print("\ndate navigation + export")
 at = fresh()
 open_panel(at, "alcohol")

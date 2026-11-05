@@ -1,6 +1,6 @@
 # Health tracker — beta
 
-Six logging panels (food, alcohol, symptoms, supplements, medications, habits)
+Seven logging panels (food, alcohol, symptoms, supplements, medications, habits, activity)
 over one event table. Python + Streamlit, SQLite locally, Supabase in production.
 
 ## Run it locally right now
@@ -96,9 +96,9 @@ Everything lands in one `events` table:
 | `event_time` | real clock time where one is meaningful (food); null elsewhere |
 | `time_bucket` | morning / afternoon / evening / night (null where not meaningful) |
 | `logged_at` | when the row was written — lets you tell live from retrospective logging |
-| `category` | food / alcohol / symptom / supplement / medication / habit / review |
+| `category` | food / alcohol / symptom / supplement / medication / habit / activity / review |
 | `item` | drink type, food text, symptom name, supplement or medication name, habit name |
-| `quantity`, `unit` | drinks, habit counts |
+| `quantity`, `unit` | drinks, habit counts, activity minutes |
 | `severity` | symptoms, 1–5 |
 | `detail` | jsonb — category-specific extras (meal slot, habit kind, supplement exception) |
 
@@ -211,6 +211,19 @@ key includes the date, so a tick never carries over to another day.
 To fill in a yes/no habit you forgot to log, `backfill_habit.py` previews and
 then writes a run of days (see the top of that file).
 
+**Activity.** Tap an activity from your usual list; each tap adds a line with
+minutes (optional) and a time of day, prefilled from the clock, like drinks on
+Alcohol. **＋ Other** adds one that isn't on the list, and can add it to the
+list for next time. The list is stored in `app_settings` (`activity_types`,
+JSON) and trimmed in Settings → Activities. One row per line: `item` = the
+activity, `quantity` = minutes, `unit` = `min`.
+
+## Time zone
+
+The server runs on UTC, so "today", "now" and the prefilled time of day come
+from the browser's own time zone (`st.context.timezone`). If that is ever
+missing, set `APP_TIMEZONE` in secrets (e.g. `America/New_York`).
+
 ## Weekly review
 
 A card on the home screen offers the week (Monday–Sunday; on a Sunday, the week
@@ -220,7 +233,7 @@ home screen reaches any earlier week. Four short steps:
 1. **Your week** — a one-line summary per category, with **Edit** (open that
    panel on a chosen day; the back arrow returns to the review) and, for
    supplements and medications, **＋ Add**.
-2. **Fill the gaps** — days with no alcohol or symptoms logged: *none* (it
+2. **Fill the gaps** — days with no alcohol, symptoms or activity logged: *none* (it
    didn't happen) or *not sure*, plus "any days you missed your usual?" for
    supplements and medications.
 3. **How complete?** — for each category, roughly what % of what happened made
